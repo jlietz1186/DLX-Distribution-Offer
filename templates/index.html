@@ -1,501 +1,441 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
-<meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>DLX Distribution - Offer Formatter</title>
-<link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.1/css/all.min.css" rel="stylesheet">
-<style>
-:root {
-    --primary: #1a365d;
-    --primary-light: #2d5a9e;
-    --accent: #4472C4;
-    --accent-light: #D9E2F3;
-    --success: #22c55e;
-    --warning: #f59e0b;
-    --danger: #ef4444;
-    --gray-50: #f9fafb;
-    --gray-100: #f3f4f6;
-    --gray-200: #e5e7eb;
-    --gray-300: #d1d5db;
-    --gray-500: #6b7280;
-    --gray-700: #374151;
-    --gray-900: #111827;
-    --radius: 12px;
-    --shadow: 0 1px 3px rgba(0,0,0,.1), 0 1px 2px rgba(0,0,0,.06);
-    --shadow-lg: 0 10px 15px -3px rgba(0,0,0,.1), 0 4px 6px rgba(0,0,0,.05);
-}
-* { box-sizing: border-box; margin: 0; padding: 0; }
-body { font-family: 'Segoe UI', system-ui, -apple-system, sans-serif; background: var(--gray-50); color: var(--gray-900); min-height: 100vh; }
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>DLX Distribution - Offer Formatter</title>
+    <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.1/css/all.min.css" rel="stylesheet">
+    <style>
+        :root {
+            --primary: #1a365d;
+            --primary-light: #2d5a9e;
+            --accent: #4472C4;
+            --accent-light: #D9E2F3;
+            --success: #22c55e;
+            --warning: #f59e0b;
+            --danger: #ef4444;
+            --gray-50: #f9fafb;
+            --gray-100: #f3f4f6;
+            --gray-200: #e5e7eb;
+            --gray-300: #d1d5db;
+            --gray-500: #6b7280;
+            --gray-700: #374151;
+            --gray-900: #111827;
+            --radius: 12px;
+            --shadow: 0 1px 3px rgba(0,0,0,.1), 0 1px 2px rgba(0,0,0,.06);
+            --shadow-lg: 0 10px 15px -3px rgba(0,0,0,.1), 0 4px 6px rgba(0,0,0,.05);
+        }
+        * { box-sizing: border-box; margin: 0; padding: 0; }
+        body { font-family: 'Segoe UI', system-ui, -apple-system, sans-serif; background: var(--gray-50); color: var(--gray-900); min-height: 100vh; }
 
-/* Header */
-.header { background: linear-gradient(135deg, var(--primary) 0%, var(--primary-light) 100%); color: white; padding: 1.25rem 2rem; display: flex; align-items: center; gap: 1rem; box-shadow: var(--shadow-lg); position: sticky; top: 0; z-index: 100; }
-.header h1 { font-size: 1.5rem; font-weight: 700; letter-spacing: -0.025em; }
-.header .subtitle { opacity: 0.8; font-size: 0.875rem; margin-left: auto; }
+        /* Header */
+        .header { background: linear-gradient(135deg, var(--primary) 0%, var(--primary-light) 100%); color: white; padding: 1.25rem 2rem; display: flex; align-items: center; gap: 1rem; box-shadow: var(--shadow-lg); position: sticky; top: 0; z-index: 100; }
+        .header h1 { font-size: 1.5rem; font-weight: 700; letter-spacing: -0.025em; }
+        .header .subtitle { opacity: 0.8; font-size: 0.875rem; margin-left: auto; }
 
-/* Container */
-.container { max-width: 1400px; margin: 0 auto; padding: 2rem; }
+        /* Container */
+        .container { max-width: 1400px; margin: 0 auto; padding: 2rem; }
 
-/* Steps */
-.steps { display: flex; gap: 0; margin-bottom: 2rem; background: white; border-radius: var(--radius); overflow: hidden; box-shadow: var(--shadow); }
-.step { flex: 1; padding: 1rem 1.5rem; display: flex; align-items: center; gap: 0.75rem; background: white; border-bottom: 3px solid transparent; transition: all .2s; }
-.step.active { background: var(--accent-light); border-bottom-color: var(--accent); }
-.step.completed { border-bottom-color: var(--success); }
-.step .step-num { width: 32px; height: 32px; border-radius: 50%; background: var(--gray-200); display: flex; align-items: center; justify-content: center; font-weight: 700; font-size: 0.875rem; flex-shrink: 0; }
-.step.active .step-num { background: var(--accent); color: white; }
-.step.completed .step-num { background: var(--success); color: white; }
-.step-label { font-size: 0.875rem; font-weight: 600; color: var(--gray-700); }
+        /* Steps */
+        .steps { display: flex; gap: 0; margin-bottom: 2rem; background: white; border-radius: var(--radius); overflow: hidden; box-shadow: var(--shadow); }
+        .step { flex: 1; padding: 1rem 1.5rem; display: flex; align-items: center; gap: 0.75rem; background: white; border-bottom: 3px solid transparent; transition: all .2s; }
+        .step.active { background: var(--accent-light); border-bottom-color: var(--accent); }
+        .step.completed { border-bottom-color: var(--success); }
+        .step .step-num { width: 32px; height: 32px; border-radius: 50%; background: var(--gray-200); display: flex; align-items: center; justify-content: center; font-weight: 700; font-size: 0.875rem; flex-shrink: 0; }
+        .step.active .step-num { background: var(--accent); color: white; }
+        .step.completed .step-num { background: var(--success); color: white; }
+        .step-label { font-size: 0.875rem; font-weight: 600; color: var(--gray-700); }
 
-/* Panels */
-.panel { background: white; border-radius: var(--radius); box-shadow: var(--shadow); padding: 2rem; margin-bottom: 1.5rem; display: none; }
-.panel.visible { display: block; }
-.panel h2 { font-size: 1.25rem; font-weight: 700; margin-bottom: 1rem; color: var(--primary); }
-.panel p.desc { color: var(--gray-500); margin-bottom: 1.5rem; font-size: 0.9rem; }
+        /* Panels */
+        .panel { background: white; border-radius: var(--radius); box-shadow: var(--shadow); padding: 2rem; margin-bottom: 1.5rem; display: none; }
+        .panel.visible { display: block; }
+        .panel h2 { font-size: 1.25rem; font-weight: 700; margin-bottom: 1rem; color: var(--primary); }
+        .panel p.desc { color: var(--gray-500); margin-bottom: 1.5rem; font-size: 0.9rem; }
 
-/* Upload Zone */
-.upload-zone { border: 2px dashed var(--gray-300); border-radius: var(--radius); padding: 3rem 2rem; text-align: center; cursor: pointer; transition: all .2s; background: var(--gray-50); }
-.upload-zone:hover, .upload-zone.dragover { border-color: var(--accent); background: var(--accent-light); }
-.upload-zone i { font-size: 3rem; color: var(--accent); margin-bottom: 1rem; }
-.upload-zone .main-text { font-size: 1.1rem; font-weight: 600; color: var(--gray-700); margin-bottom: 0.5rem; }
-.upload-zone .sub-text { font-size: 0.85rem; color: var(--gray-500); }
-.upload-zone input { display: none; }
+        /* Upload Zone */
+        .upload-zone { border: 2px dashed var(--gray-300); border-radius: var(--radius); padding: 3rem 2rem; text-align: center; cursor: pointer; transition: all .2s; background: var(--gray-50); }
+        .upload-zone:hover, .upload-zone.dragover { border-color: var(--accent); background: var(--accent-light); }
+        .upload-zone i { font-size: 3rem; color: var(--accent); margin-bottom: 1rem; }
+        .upload-zone .main-text { font-size: 1.1rem; font-weight: 600; color: var(--gray-700); margin-bottom: 0.5rem; }
+        .upload-zone .sub-text { font-size: 0.85rem; color: var(--gray-500); }
+        .upload-zone input { display: none; }
 
-/* Mapping Grid */
-.mapping-grid { display: grid; grid-template-columns: 1fr auto 1fr; gap: 0.75rem; align-items: center; }
-.mapping-label { font-weight: 600; font-size: 0.9rem; color: var(--primary); padding: 0.5rem 0; }
-.mapping-arrow { color: var(--gray-300); font-size: 1.2rem; }
-.mapping-select { width: 100%; padding: 0.6rem 0.75rem; border: 1px solid var(--gray-300); border-radius: 8px; font-size: 0.875rem; background: white; cursor: pointer; }
-.mapping-select:focus { outline: none; border-color: var(--accent); box-shadow: 0 0 0 3px rgba(68,114,196,.15); }
+        /* Mapping Grid */
+        .mapping-grid { display: grid; grid-template-columns: 1fr auto 1fr; gap: 0.75rem; align-items: center; }
+        .mapping-label { font-weight: 600; font-size: 0.9rem; color: var(--primary); padding: 0.5rem 0; }
+        .mapping-arrow { color: var(--gray-300); font-size: 1.2rem; }
+        .mapping-select { width: 100%; padding: 0.6rem 0.75rem; border: 1px solid var(--gray-300); border-radius: 8px; font-size: 0.875rem; background: white; cursor: pointer; }
+        .mapping-select:focus { outline: none; border-color: var(--accent); box-shadow: 0 0 0 3px rgba(68,114,196,.15); }
 
-/* Buttons */
-.btn { padding: 0.7rem 1.5rem; border: none; border-radius: 8px; font-size: 0.9rem; font-weight: 600; cursor: pointer; transition: all .15s; display: inline-flex; align-items: center; gap: 0.5rem; }
-.btn-primary { background: var(--accent); color: white; }
-.btn-primary:hover { background: var(--primary-light); }
-.btn-success { background: var(--success); color: white; }
-.btn-success:hover { background: #16a34a; }
-.btn-outline { background: white; color: var(--accent); border: 2px solid var(--accent); }
-.btn-outline:hover { background: var(--accent-light); }
-.btn:disabled { opacity: 0.5; cursor: not-allowed; }
-.btn-group { display: flex; gap: 0.75rem; margin-top: 1.5rem; flex-wrap: wrap; }
+        /* Buttons */
+        .btn { padding: 0.7rem 1.5rem; border: none; border-radius: 8px; font-size: 0.9rem; font-weight: 600; cursor: pointer; transition: all .15s; display: inline-flex; align-items: center; gap: 0.5rem; }
+        .btn-primary { background: var(--accent); color: white; }
+        .btn-primary:hover { background: var(--primary-light); }
+        .btn-success { background: var(--success); color: white; }
+        .btn-success:hover { background: #16a34a; }
+        .btn-outline { background: white; color: var(--accent); border: 2px solid var(--accent); }
+        .btn-outline:hover { background: var(--accent-light); }
+        .btn:disabled { opacity: 0.5; cursor: not-allowed; }
+        .btn-group { display: flex; gap: 0.75rem; margin-top: 1.5rem; flex-wrap: wrap; }
 
-/* Results Table */
-.table-wrapper { overflow-x: auto; border-radius: var(--radius); border: 1px solid var(--gray-200); }
-table { width: 100%; border-collapse: collapse; font-size: 0.85rem; }
-thead th { background: var(--accent); color: white; padding: 0.85rem 1rem; text-align: center; font-weight: 700; font-size: 0.9rem; white-space: nowrap; position: sticky; top: 0; }
-tbody td { padding: 0.75rem 1rem; text-align: center; vertical-align: middle; border-bottom: 1px solid var(--gray-200); max-width: 200px; word-wrap: break-word; }
-tbody tr:nth-child(even) { background: var(--accent-light); }
-tbody tr:hover { background: #c5d5ef; }
-td.img-cell img { max-width: 90px; max-height: 90px; object-fit: contain; border-radius: 6px; border: 1px solid var(--gray-200); }
-td.img-cell .img-placeholder { width: 80px; height: 80px; background: var(--gray-100); border-radius: 6px; display: flex; align-items: center; justify-content: center; margin: 0 auto; color: var(--gray-500); font-size: 0.75rem; }
-td a { color: var(--accent); text-decoration: none; font-weight: 500; }
-td a:hover { text-decoration: underline; }
-td .na-badge { background: var(--gray-200); color: var(--gray-500); padding: 0.2rem 0.6rem; border-radius: 4px; font-size: 0.8rem; }
+        /* Results Table */
+        .table-wrapper { overflow-x: auto; border-radius: var(--radius); border: 1px solid var(--gray-200); }
+        table { width: 100%; border-collapse: collapse; font-size: 0.85rem; }
+        thead th { background: var(--accent); color: white; padding: 0.85rem 1rem; text-align: center; font-weight: 700; font-size: 0.9rem; white-space: nowrap; position: sticky; top: 0; }
+        tbody td { padding: 0.75rem 1rem; text-align: center; vertical-align: middle; border-bottom: 1px solid var(--gray-200); max-width: 200px; word-wrap: break-word; }
+        tbody tr:nth-child(even) { background: var(--accent-light); }
+        tbody tr:hover { background: #c5d5ef; }
+        td.img-cell img { max-width: 90px; max-height: 90px; object-fit: contain; border-radius: 6px; border: 1px solid var(--gray-200); }
+        td.img-cell .img-placeholder { width: 80px; height: 80px; background: var(--gray-100); border-radius: 6px; display: flex; align-items: center; justify-content: center; margin: 0 auto; color: var(--gray-500); font-size: 0.75rem; }
+        td a { color: var(--accent); text-decoration: none; font-weight: 500; }
+        td a:hover { text-decoration: underline; }
+        td .na-badge { background: var(--gray-200); color: var(--gray-500); padding: 0.2rem 0.6rem; border-radius: 4px; font-size: 0.8rem; }
 
-/* Loading / Progress */
-.loader { display: none; align-items: center; gap: 1rem; padding: 1.5rem; background: var(--accent-light); border-radius: var(--radius); margin: 1rem 0; }
-.loader.visible { display: flex; }
-.spinner { width: 24px; height: 24px; border: 3px solid var(--gray-200); border-top-color: var(--accent); border-radius: 50%; animation: spin .8s linear infinite; flex-shrink: 0; }
-@keyframes spin { to { transform: rotate(360deg); } }
-.loader-text { font-size: 0.9rem; color: var(--gray-700); }
-.progress-bar { height: 6px; background: var(--gray-200); border-radius: 3px; overflow: hidden; margin-top: 0.5rem; }
-.progress-fill { height: 100%; background: var(--accent); border-radius: 3px; transition: width .3s; width: 0%; }
+        /* Loading / Progress */
+        .loader { display: none; align-items: center; gap: 1rem; padding: 1.5rem; background: var(--accent-light); border-radius: var(--radius); margin: 1rem 0; }
+        .loader.visible { display: flex; }
+        .spinner { width: 24px; height: 24px; border: 3px solid var(--gray-200); border-top-color: var(--accent); border-radius: 50%; animation: spin .8s linear infinite; flex-shrink: 0; }
+        @keyframes spin { to { transform: rotate(360deg); } }
+        .loader-text { font-size: 0.9rem; color: var(--gray-700); }
+        .progress-bar { height: 6px; background: var(--gray-200); border-radius: 3px; overflow: hidden; margin-top: 0.5rem; }
+        .progress-fill { height: 100%; background: var(--accent); border-radius: 3px; transition: width .3s; width: 0%; }
 
-/* Stats Bar */
-.stats-bar { display: flex; gap: 1.5rem; margin-bottom: 1.5rem; flex-wrap: wrap; }
-.stat-card { background: white; border-radius: var(--radius); padding: 1rem 1.5rem; box-shadow: var(--shadow); display: flex; align-items: center; gap: 0.75rem; }
-.stat-card i { font-size: 1.5rem; color: var(--accent); }
-.stat-value { font-size: 1.5rem; font-weight: 700; color: var(--primary); }
-.stat-label { font-size: 0.8rem; color: var(--gray-500); }
+        /* Stats Bar */
+        .stats-bar { display: flex; gap: 1.5rem; margin-bottom: 1.5rem; flex-wrap: wrap; }
+        .stat-card { background: white; border-radius: var(--radius); padding: 1rem 1.5rem; box-shadow: var(--shadow); display: flex; align-items: center; gap: 0.75rem; }
+        .stat-card i { font-size: 1.5rem; color: var(--accent); }
+        .stat-value { font-size: 1.5rem; font-weight: 700; color: var(--primary); }
+        .stat-label { font-size: 0.8rem; color: var(--gray-500); }
 
-/* Toast */
-.toast { position: fixed; bottom: 2rem; right: 2rem; background: var(--gray-900); color: white; padding: 1rem 1.5rem; border-radius: 8px; box-shadow: var(--shadow-lg); display: none; z-index: 200; max-width: 400px; font-size: 0.9rem; }
-.toast.error { background: var(--danger); }
-.toast.success { background: var(--success); }
+        /* Toast */
+        .toast { position: fixed; bottom: 2rem; right: 2rem; background: var(--gray-900); color: white; padding: 1rem 1.5rem; border-radius: 8px; box-shadow: var(--shadow-lg); display: none; z-index: 200; max-width: 400px; font-size: 0.9rem; }
+        .toast.error { background: var(--danger); }
+        .toast.success { background: var(--success); }
 
-/* Responsive */
-@media (max-width: 768px) {
-    .container { padding: 1rem; }
-    .steps { flex-direction: column; }
-    .mapping-grid { grid-template-columns: 1fr; }
-    .mapping-arrow { display: none; }
-    .header { padding: 1rem; }
-    .header h1 { font-size: 1.2rem; }
-}
-</style>
+        /* Responsive */
+        @media (max-width: 768px) {
+            .container { padding: 1rem; }
+            .steps { flex-direction: column; }
+            .mapping-grid { grid-template-columns: 1fr; }
+            .mapping-arrow { display: none; }
+            .header { padding: 1rem; }
+            .header h1 { font-size: 1.2rem; }
+        }
+    </style>
 </head>
 <body>
-
-<div class="header">
-    <i class="fas fa-boxes-stacked" style="font-size:1.5rem"></i>
-    <h1>DLX Distribution Offer Formatter</h1>
-    <span class="subtitle">Upload &rarr; Map &rarr; Enrich &rarr; Export</span>
-</div>
-
-<div class="container">
-    <!-- Step Indicators -->
-    <div class="steps">
-        <div class="step active" id="step1-indicator">
-            <div class="step-num">1</div>
-            <span class="step-label">Upload File</span>
-        </div>
-        <div class="step" id="step2-indicator">
-            <div class="step-num">2</div>
-            <span class="step-label">Map Columns</span>
-        </div>
-        <div class="step" id="step3-indicator">
-            <div class="step-num">3</div>
-            <span class="step-label">Review & Enrich</span>
-        </div>
-        <div class="step" id="step4-indicator">
-            <div class="step-num">4</div>
-            <span class="step-label">Export</span>
-        </div>
+    <div class="header">
+        <i class="fas fa-boxes-stacked" style="font-size:1.5rem"></i>
+        <h1>DLX Distribution Offer Formatter</h1>
+        <span class="subtitle">Upload &rarr; Map &rarr; Enrich &rarr; Export</span>
     </div>
 
-    <!-- Step 1: Upload -->
-    <div class="panel visible" id="step1">
-        <h2><i class="fas fa-cloud-upload-alt"></i> Upload Your Source File</h2>
-        <p class="desc">Upload a spreadsheet (.xlsx, .csv) or PDF containing product data. We'll help you map it to the DLX offer template.</p>
-        <div class="upload-zone" id="dropZone">
-            <i class="fas fa-file-arrow-up"></i>
-            <div class="main-text">Drop your file here or click to browse</div>
-            <div class="sub-text">Supports .xlsx, .xls, .csv, .tsv, .pdf &bull; Max 50 MB</div>
-            <input type="file" id="fileInput" accept=".xlsx,.xls,.csv,.tsv,.pdf">
+    <div class="container">
+        <!-- Step Indicators -->
+        <div class="steps">
+            <div class="step active" id="step1-indicator">
+                <div class="step-num">1</div>
+                <span class="step-label">Upload File</span>
+            </div>
+            <div class="step" id="step2-indicator">
+                <div class="step-num">2</div>
+                <span class="step-label">Map Columns</span>
+            </div>
+            <div class="step" id="step3-indicator">
+                <div class="step-num">3</div>
+                <span class="step-label">Review & Enrich</span>
+            </div>
+            <div class="step" id="step4-indicator">
+                <div class="step-num">4</div>
+                <span class="step-label">Export</span>
+            </div>
         </div>
-        <div class="loader" id="uploadLoader">
-            <div class="spinner"></div>
-            <div>
-                <div class="loader-text">Parsing your file...</div>
-                <div class="progress-bar"><div class="progress-fill" id="uploadProgress"></div></div>
+
+        <!-- Step 1: Upload -->
+        <div class="panel visible" id="step1">
+            <h2><i class="fas fa-cloud-upload-alt"></i> Upload Your Source File</h2>
+            <p class="desc">Upload a spreadsheet (.xlsx, .csv) or PDF containing product data. We'll help you map it to the DLX offer template.</p>
+            <div class="upload-zone" id="dropZone">
+                <i class="fas fa-file-arrow-up"></i>
+                <div class="main-text">Drop your file here or click to browse</div>
+                <div class="sub-text">Supports .xlsx, .xls, .csv, .tsv, .pdf &bull; Max 50 MB</div>
+                <input type="file" id="fileInput" accept=".xlsx,.xls,.csv,.tsv,.pdf">
+            </div>
+            <div class="loader" id="uploadLoader">
+                <div class="spinner"></div>
+                <div>
+                    <div class="loader-text">Parsing your file...</div>
+                    <div class="progress-bar"><div class="progress-fill" id="uploadProgress"></div></div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Step 2: Map Columns -->
+        <div class="panel" id="step2">
+            <h2><i class="fas fa-arrows-left-right"></i> Map Source Columns to Template</h2>
+            <p class="desc">We've auto-detected likely matches. Adjust any that look wrong, or leave blank to skip a field.</p>
+            <div class="mapping-grid" id="mappingGrid"></div>
+            <div class="btn-group">
+                <button class="btn btn-outline" onclick="goToStep(1)"><i class="fas fa-arrow-left"></i> Back</button>
+                <button class="btn btn-primary" onclick="processMapping()"><i class="fas fa-wand-magic-sparkles"></i> Process Data</button>
+            </div>
+        </div>
+
+        <!-- Step 3: Review & Enrich -->
+        <div class="panel" id="step3">
+            <h2><i class="fas fa-table-list"></i> Review Your Offer</h2>
+            <p class="desc">Review the formatted data below. Click "Enrich All" to auto-lookup missing images and retail links.</p>
+            <div class="stats-bar" id="statsBar"></div>
+            <div class="btn-group" style="margin-top:0;margin-bottom:1.5rem">
+                <button class="btn btn-outline" onclick="goToStep(2)"><i class="fas fa-arrow-left"></i> Back to Mapping</button>
+                <button class="btn btn-primary" onclick="enrichAll()" id="enrichBtn"><i class="fas fa-wand-magic-sparkles"></i> Enrich All (Lookup Images & Links)</button>
+            </div>
+            <div class="loader" id="enrichLoader">
+                <div class="spinner"></div>
+                <div>
+                    <div class="loader-text" id="enrichText">Looking up product info...</div>
+                    <div class="progress-bar"><div class="progress-fill" id="enrichProgress"></div></div>
+                </div>
+            </div>
+            <div class="table-wrapper">
+                <table id="resultsTable">
+                    <thead><tr id="tableHead"></tr></thead>
+                    <tbody id="tableBody"></tbody>
+                </table>
+            </div>
+            <div class="btn-group">
+                <button class="btn btn-success" onclick="exportExcel()" id="exportBtn"><i class="fas fa-file-excel"></i> Download Excel (.xlsx)</button>
             </div>
         </div>
     </div>
 
-    <!-- Step 2: Map Columns -->
-    <div class="panel" id="step2">
-        <h2><i class="fas fa-arrows-left-right"></i> Map Source Columns to Template</h2>
-        <p class="desc">We've auto-detected likely matches. Adjust any that look wrong, or leave blank to skip a field.</p>
-        <div class="mapping-grid" id="mappingGrid"></div>
-        <div class="btn-group">
-            <button class="btn btn-outline" onclick="goToStep(1)"><i class="fas fa-arrow-left"></i> Back</button>
-            <button class="btn btn-primary" onclick="processMapping()"><i class="fas fa-wand-magic-sparkles"></i> Process Data</button>
-        </div>
-    </div>
+    <div class="toast" id="toast"></div>
 
-    <!-- Step 3: Review & Enrich -->
-    <div class="panel" id="step3">
-        <h2><i class="fas fa-table-list"></i> Review Your Offer</h2>
-        <p class="desc">Review the formatted data below. Click "Enrich All" to auto-lookup missing images and retail links.</p>
+    <script>
+        const TEMPLATE_COLS = ['Image', 'Item Name', 'Expiration', 'UPC/Item #', 'Quantity', 'Casepack', 'Cost', 'Retail Link', 'FOB'];
+        let state = { sessionId: null, sourceColumns: [], mapping: {}, items: [], rawPreview: [] };
 
-        <div class="stats-bar" id="statsBar"></div>
-
-        <div class="btn-group" style="margin-top:0;margin-bottom:1.5rem">
-            <button class="btn btn-outline" onclick="goToStep(2)"><i class="fas fa-arrow-left"></i> Back to Mapping</button>
-            <button class="btn btn-primary" onclick="enrichAll()" id="enrichBtn"><i class="fas fa-wand-magic-sparkles"></i> Enrich All (Lookup Images & Links)</button>
-        </div>
-
-        <div class="loader" id="enrichLoader">
-            <div class="spinner"></div>
-            <div>
-                <div class="loader-text" id="enrichText">Looking up product info...</div>
-                <div class="progress-bar"><div class="progress-fill" id="enrichProgress"></div></div>
-            </div>
-        </div>
-
-        <div class="table-wrapper">
-            <table id="resultsTable">
-                <thead><tr id="tableHead"></tr></thead>
-                <tbody id="tableBody"></tbody>
-            </table>
-        </div>
-
-        <div class="btn-group">
-            <button class="btn btn-success" onclick="exportExcel()" id="exportBtn"><i class="fas fa-file-excel"></i> Download Excel (.xlsx)</button>
-        </div>
-    </div>
-</div>
-
-<div class="toast" id="toast"></div>
-
-<script>
-const TEMPLATE_COLS = ['Image', 'Item Name', 'Expiration', 'UPC/Item #', 'Quantity', 'Casepack', 'Cost', 'Retail Link', 'FOB'];
-let state = { sessionId: null, sourceColumns: [], mapping: {}, items: [], rawPreview: [] };
-
-// ── Upload ───────────────────────────────────────────────────────────────────
-
-const dropZone = document.getElementById('dropZone');
-const fileInput = document.getElementById('fileInput');
-
-dropZone.addEventListener('click', () => fileInput.click());
-dropZone.addEventListener('dragover', e => { e.preventDefault(); dropZone.classList.add('dragover'); });
-dropZone.addEventListener('dragleave', () => dropZone.classList.remove('dragover'));
-dropZone.addEventListener('drop', e => {
-    e.preventDefault();
-    dropZone.classList.remove('dragover');
-    if (e.dataTransfer.files.length) handleFile(e.dataTransfer.files[0]);
-});
-fileInput.addEventListener('change', e => { if (e.target.files.length) handleFile(e.target.files[0]); });
-
-async function handleFile(file) {
-    const loader = document.getElementById('uploadLoader');
-    const progress = document.getElementById('uploadProgress');
-    loader.classList.add('visible');
-    progress.style.width = '30%';
-
-    const formData = new FormData();
-    formData.append('file', file);
-
-    try {
-        progress.style.width = '60%';
-        const resp = await fetch('/upload', { method: 'POST', body: formData });
-        const data = await resp.json();
-        progress.style.width = '100%';
-
-        if (data.error) { showToast(data.error, 'error'); loader.classList.remove('visible'); return; }
-
-        state.sessionId = data.session_id;
-        state.sourceColumns = data.source_columns;
-        state.mapping = data.suggested_mapping;
-        state.rawPreview = data.preview;
-
-        buildMappingUI();
-        setTimeout(() => { loader.classList.remove('visible'); goToStep(2); }, 400);
-    } catch (err) {
-        showToast('Upload failed: ' + err.message, 'error');
-        loader.classList.remove('visible');
-    }
-}
-
-// ── Column Mapping ───────────────────────────────────────────────────────────
-
-function buildMappingUI() {
-    const grid = document.getElementById('mappingGrid');
-    grid.innerHTML = '';
-    TEMPLATE_COLS.forEach(col => {
-        const label = document.createElement('div');
-        label.className = 'mapping-label';
-        label.textContent = col;
-
-        const arrow = document.createElement('div');
-        arrow.className = 'mapping-arrow';
-        arrow.innerHTML = '<i class="fas fa-arrow-left"></i>';
-
-        const select = document.createElement('select');
-        select.className = 'mapping-select';
-        select.dataset.templateCol = col;
-        select.innerHTML = '<option value="">(skip / not in source)</option>';
-        state.sourceColumns.forEach(sc => {
-            const opt = document.createElement('option');
-            opt.value = sc;
-            opt.textContent = sc;
-            if (state.mapping[col] === sc) opt.selected = true;
-            select.appendChild(opt);
+        // ── Upload ───────────────────────────────────────────────────────────────
+        const dropZone = document.getElementById('dropZone');
+        const fileInput = document.getElementById('fileInput');
+        dropZone.addEventListener('click', () => fileInput.click());
+        dropZone.addEventListener('dragover', e => { e.preventDefault(); dropZone.classList.add('dragover'); });
+        dropZone.addEventListener('dragleave', () => dropZone.classList.remove('dragover'));
+        dropZone.addEventListener('drop', e => {
+            e.preventDefault(); dropZone.classList.remove('dragover');
+            if (e.dataTransfer.files.length) handleFile(e.dataTransfer.files[0]);
         });
+        fileInput.addEventListener('change', e => { if (e.target.files.length) handleFile(e.target.files[0]); });
 
-        grid.appendChild(label);
-        grid.appendChild(arrow);
-        grid.appendChild(select);
-    });
-}
-
-async function processMapping() {
-    const selects = document.querySelectorAll('.mapping-select');
-    const mapping = {};
-    selects.forEach(s => { if (s.value) mapping[s.dataset.templateCol] = s.value; });
-    state.mapping = mapping;
-
-    showToast('Processing data...', 'info');
-
-    try {
-        const resp = await fetch('/process', {
-            method: 'POST',
-            headers: {'Content-Type': 'application/json'},
-            body: JSON.stringify({ session_id: state.sessionId, mapping })
-        });
-        const data = await resp.json();
-        if (data.error) { showToast(data.error, 'error'); return; }
-
-        state.items = data.results;
-        renderTable();
-        updateStats();
-        goToStep(3);
-    } catch (err) {
-        showToast('Processing failed: ' + err.message, 'error');
-    }
-}
-
-// ── Table Rendering ──────────────────────────────────────────────────────────
-
-function renderTable() {
-    const thead = document.getElementById('tableHead');
-    const tbody = document.getElementById('tableBody');
-    thead.innerHTML = '';
-    tbody.innerHTML = '';
-
-    TEMPLATE_COLS.forEach(c => { const th = document.createElement('th'); th.textContent = c; thead.appendChild(th); });
-
-    state.items.forEach((item, idx) => {
-        const tr = document.createElement('tr');
-        TEMPLATE_COLS.forEach(col => {
-            const td = document.createElement('td');
-            const val = item[col] || '';
-
-            if (col === 'Image') {
-                td.className = 'img-cell';
-                if (val && val.startsWith('http') && !val.includes('google.com/search')) {
-                    td.innerHTML = `<img src="${escHtml(val)}" alt="Product" onerror="this.parentElement.innerHTML='<div class=\\'img-placeholder\\'>No image</div>'">`;
-                } else if (val && val.includes('google.com/search')) {
-                    td.innerHTML = `<a href="${escHtml(val)}" target="_blank" title="Search for image"><div class="img-placeholder"><i class="fas fa-search" style="font-size:1.5rem"></i><br>Search</div></a>`;
-                } else {
-                    td.innerHTML = '<div class="img-placeholder"><i class="fas fa-image" style="font-size:1.5rem;opacity:.4"></i></div>';
-                }
-            } else if (col === 'Retail Link') {
-                if (val && val.startsWith('http')) {
-                    let display = 'View Product';
-                    try { display = new URL(val).hostname.replace('www.',''); } catch(e) {}
-                    td.innerHTML = `<a href="${escHtml(val)}" target="_blank"><i class="fas fa-external-link-alt"></i> ${escHtml(display)}</a>`;
-                } else {
-                    td.innerHTML = '<span class="na-badge">—</span>';
-                }
-            } else if (col === 'Expiration' && (!val || val === 'NA')) {
-                td.innerHTML = '<span class="na-badge">NA</span>';
-            } else if (col === 'Cost' && val) {
-                const num = parseFloat(val.replace(/[^0-9.]/g, ''));
-                td.textContent = isNaN(num) ? val : '$' + num.toFixed(2);
-            } else {
-                td.textContent = val;
-            }
-            tr.appendChild(td);
-        });
-        tbody.appendChild(tr);
-    });
-}
-
-function updateStats() {
-    const bar = document.getElementById('statsBar');
-    const total = state.items.length;
-    const withImg = state.items.filter(i => i.Image && i.Image.startsWith('http') && !i.Image.includes('google.com/search')).length;
-    const withLink = state.items.filter(i => i.Retail_Link || (i['Retail Link'] && i['Retail Link'].startsWith('http'))).length;
-    const withExp = state.items.filter(i => i.Expiration && i.Expiration !== 'NA').length;
-
-    bar.innerHTML = `
-        <div class="stat-card"><i class="fas fa-boxes-stacked"></i><div><div class="stat-value">${total}</div><div class="stat-label">Total Items</div></div></div>
-        <div class="stat-card"><i class="fas fa-image"></i><div><div class="stat-value">${withImg}/${total}</div><div class="stat-label">With Images</div></div></div>
-        <div class="stat-card"><i class="fas fa-link"></i><div><div class="stat-value">${withLink}/${total}</div><div class="stat-label">Retail Links</div></div></div>
-        <div class="stat-card"><i class="fas fa-calendar"></i><div><div class="stat-value">${withExp}/${total}</div><div class="stat-label">Have Expiration</div></div></div>
-    `;
-}
-
-// ── Enrichment ───────────────────────────────────────────────────────────────
-
-async function enrichAll() {
-    const btn = document.getElementById('enrichBtn');
-    btn.disabled = true;
-    const loader = document.getElementById('enrichLoader');
-    const progress = document.getElementById('enrichProgress');
-    const text = document.getElementById('enrichText');
-    loader.classList.add('visible');
-
-    // Find items needing enrichment
-    const needEnrich = [];
-    state.items.forEach((item, i) => {
-        const noImg = !item.Image || item.Image === '' || item.Image.includes('google.com/search');
-        const noLink = !item['Retail Link'] || item['Retail Link'] === '';
-        if (noImg || noLink) needEnrich.push(i);
-    });
-
-    if (needEnrich.length === 0) {
-        showToast('All items already have images and links!', 'success');
-        loader.classList.remove('visible');
-        btn.disabled = false;
-        return;
-    }
-
-    // Process in batches of 3
-    const batchSize = 3;
-    for (let b = 0; b < needEnrich.length; b += batchSize) {
-        const batch = needEnrich.slice(b, b + batchSize);
-        const pct = Math.round(((b + batch.length) / needEnrich.length) * 100);
-        progress.style.width = pct + '%';
-        text.textContent = `Looking up products... ${b + batch.length} of ${needEnrich.length}`;
-
-        try {
-            const resp = await fetch('/enrich', {
-                method: 'POST',
-                headers: {'Content-Type': 'application/json'},
-                body: JSON.stringify({ session_id: state.sessionId, items: state.items, indices: batch })
-            });
-            const data = await resp.json();
-            data.enriched.forEach(e => { state.items[e.index] = e.item; });
-        } catch (err) {
-            console.error('Enrich batch failed:', err);
+        async function handleFile(file) {
+            const loader = document.getElementById('uploadLoader');
+            const progress = document.getElementById('uploadProgress');
+            loader.classList.add('visible');
+            progress.style.width = '30%';
+            const formData = new FormData();
+            formData.append('file', file);
+            try {
+                progress.style.width = '60%';
+                const resp = await fetch('/upload', { method: 'POST', body: formData });
+                const data = await resp.json();
+                progress.style.width = '100%';
+                if (data.error) { showToast(data.error, 'error'); loader.classList.remove('visible'); return; }
+                state.sessionId = data.session_id;
+                state.sourceColumns = data.source_columns;
+                state.mapping = data.suggested_mapping;
+                state.rawPreview = data.preview;
+                buildMappingUI();
+                setTimeout(() => { loader.classList.remove('visible'); goToStep(2); }, 400);
+            } catch (err) { showToast('Upload failed: ' + err.message, 'error'); loader.classList.remove('visible'); }
         }
-    }
 
-    renderTable();
-    updateStats();
-    loader.classList.remove('visible');
-    btn.disabled = false;
-    showToast(`Enriched ${needEnrich.length} items!`, 'success');
-}
+        // ── Column Mapping ───────────────────────────────────────────────────────
+        function buildMappingUI() {
+            const grid = document.getElementById('mappingGrid');
+            grid.innerHTML = '';
+            TEMPLATE_COLS.forEach(col => {
+                const label = document.createElement('div'); label.className = 'mapping-label'; label.textContent = col;
+                const arrow = document.createElement('div'); arrow.className = 'mapping-arrow'; arrow.innerHTML = '<i class="fas fa-arrow-left"></i>';
+                const select = document.createElement('select'); select.className = 'mapping-select'; select.dataset.templateCol = col;
+                select.innerHTML = '<option value="">(skip / not in source)</option>';
+                state.sourceColumns.forEach(sc => {
+                    const opt = document.createElement('option'); opt.value = sc; opt.textContent = sc;
+                    if (state.mapping[col] === sc) opt.selected = true;
+                    select.appendChild(opt);
+                });
+                grid.appendChild(label); grid.appendChild(arrow); grid.appendChild(select);
+            });
+        }
 
-// ── Export ────────────────────────────────────────────────────────────────────
+        async function processMapping() {
+            const selects = document.querySelectorAll('.mapping-select');
+            const mapping = {};
+            selects.forEach(s => { if (s.value) mapping[s.dataset.templateCol] = s.value; });
+            state.mapping = mapping;
+            showToast('Processing data...', 'info');
+            try {
+                const resp = await fetch('/process', {
+                    method: 'POST', headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({ session_id: state.sessionId, mapping })
+                });
+                const data = await resp.json();
+                if (data.error) { showToast(data.error, 'error'); return; }
+                state.items = data.results;
+                renderTable();
+                updateStats();
+                goToStep(3);
+                // Auto-enrich after processing to find images and links
+                setTimeout(() => { enrichAll(); }, 500);
+            } catch (err) { showToast('Processing failed: ' + err.message, 'error'); }
+        }
 
-async function exportExcel() {
-    const btn = document.getElementById('exportBtn');
-    btn.disabled = true;
-    btn.innerHTML = '<i class="fas fa-spinner fa-spin"></i> Generating...';
+        // ── Table Rendering ──────────────────────────────────────────────────────
+        function isValidImageUrl(val) {
+            return val && typeof val === 'string' && val.startsWith('http') && !val.includes('google.com/search');
+        }
 
-    try {
-        const resp = await fetch('/export', {
-            method: 'POST',
-            headers: {'Content-Type': 'application/json'},
-            body: JSON.stringify({ items: state.items })
-        });
+        function renderTable() {
+            const thead = document.getElementById('tableHead');
+            const tbody = document.getElementById('tableBody');
+            thead.innerHTML = ''; tbody.innerHTML = '';
+            TEMPLATE_COLS.forEach(c => { const th = document.createElement('th'); th.textContent = c; thead.appendChild(th); });
+            state.items.forEach((item, idx) => {
+                const tr = document.createElement('tr');
+                TEMPLATE_COLS.forEach(col => {
+                    const td = document.createElement('td');
+                    const val = item[col] || '';
+                    if (col === 'Image') {
+                        td.className = 'img-cell';
+                        if (isValidImageUrl(val)) {
+                            td.innerHTML = `<img src="${escHtml(val)}" alt="Product" onerror="this.parentElement.innerHTML='<div class=\\'img-placeholder\\'>No image</div>'">`;
+                        } else if (val && val.includes('google.com/search')) {
+                            td.innerHTML = `<a href="${escHtml(val)}" target="_blank" title="Search for image"><div class="img-placeholder"><i class="fas fa-search" style="font-size:1.5rem"></i><br>Search</div></a>`;
+                        } else {
+                            td.innerHTML = '<div class="img-placeholder"><i class="fas fa-image" style="font-size:1.5rem;opacity:.4"></i></div>';
+                        }
+                    } else if (col === 'Retail Link') {
+                        if (val && val.startsWith('http')) {
+                            let display = 'View Product';
+                            try { display = new URL(val).hostname.replace('www.',''); } catch(e) {}
+                            td.innerHTML = `<a href="${escHtml(val)}" target="_blank"><i class="fas fa-external-link-alt"></i> ${escHtml(display)}</a>`;
+                        } else {
+                            td.innerHTML = '<span class="na-badge">&mdash;</span>';
+                        }
+                    } else if (col === 'Expiration' && (!val || val === 'NA')) {
+                        td.innerHTML = '<span class="na-badge">NA</span>';
+                    } else if (col === 'Cost' && val) {
+                        const num = parseFloat(val.replace(/[^0-9.]/g, ''));
+                        td.textContent = isNaN(num) ? val : '$' + num.toFixed(2);
+                    } else {
+                        td.textContent = val;
+                    }
+                    tr.appendChild(td);
+                });
+                tbody.appendChild(tr);
+            });
+        }
 
-        if (!resp.ok) throw new Error('Export failed');
+        function updateStats() {
+            const bar = document.getElementById('statsBar');
+            const total = state.items.length;
+            const withImg = state.items.filter(i => isValidImageUrl(i.Image)).length;
+            const withLink = state.items.filter(i => i['Retail Link'] && i['Retail Link'].startsWith('http')).length;
+            const withExp = state.items.filter(i => i.Expiration && i.Expiration !== 'NA').length;
+            bar.innerHTML = `
+                <div class="stat-card"><i class="fas fa-boxes-stacked"></i><div><div class="stat-value">${total}</div><div class="stat-label">Total Items</div></div></div>
+                <div class="stat-card"><i class="fas fa-image"></i><div><div class="stat-value">${withImg}/${total}</div><div class="stat-label">With Images</div></div></div>
+                <div class="stat-card"><i class="fas fa-link"></i><div><div class="stat-value">${withLink}/${total}</div><div class="stat-label">Retail Links</div></div></div>
+                <div class="stat-card"><i class="fas fa-calendar"></i><div><div class="stat-value">${withExp}/${total}</div><div class="stat-label">Have Expiration</div></div></div>
+            `;
+        }
 
-        const blob = await resp.blob();
-        const url = URL.createObjectURL(blob);
-        const a = document.createElement('a');
-        a.href = url;
-        a.download = 'DLX_Distribution_Offer.xlsx';
-        a.click();
-        URL.revokeObjectURL(url);
-        showToast('Excel file downloaded!', 'success');
-    } catch (err) {
-        showToast('Export failed: ' + err.message, 'error');
-    } finally {
-        btn.disabled = false;
-        btn.innerHTML = '<i class="fas fa-file-excel"></i> Download Excel (.xlsx)';
-    }
-}
+        // ── Enrichment ───────────────────────────────────────────────────────────
+        async function enrichAll() {
+            const btn = document.getElementById('enrichBtn');
+            btn.disabled = true;
+            const loader = document.getElementById('enrichLoader');
+            const progress = document.getElementById('enrichProgress');
+            const text = document.getElementById('enrichText');
+            loader.classList.add('visible');
 
-// ── Navigation ───────────────────────────────────────────────────────────────
+            // FIXED: Also enrich items where Image is non-empty but not a valid URL
+            const needEnrich = [];
+            state.items.forEach((item, i) => {
+                const noImg = !isValidImageUrl(item.Image);
+                const noLink = !item['Retail Link'] || !item['Retail Link'].startsWith('http');
+                if (noImg || noLink) needEnrich.push(i);
+            });
 
-function goToStep(n) {
-    document.querySelectorAll('.panel').forEach(p => p.classList.remove('visible'));
-    document.getElementById('step' + n).classList.add('visible');
-    document.querySelectorAll('.step').forEach((s, i) => {
-        s.classList.remove('active', 'completed');
-        if (i + 1 < n) s.classList.add('completed');
-        if (i + 1 === n) s.classList.add('active');
-    });
-    window.scrollTo({ top: 0, behavior: 'smooth' });
-}
+            if (needEnrich.length === 0) {
+                showToast('All items already have images and links!', 'success');
+                loader.classList.remove('visible');
+                btn.disabled = false;
+                return;
+            }
 
-// ── Utilities ────────────────────────────────────────────────────────────────
+            // Process in batches of 3
+            const batchSize = 3;
+            for (let b = 0; b < needEnrich.length; b += batchSize) {
+                const batch = needEnrich.slice(b, b + batchSize);
+                const pct = Math.round(((b + batch.length) / needEnrich.length) * 100);
+                progress.style.width = pct + '%';
+                text.textContent = `Looking up products... ${b + batch.length} of ${needEnrich.length}`;
+                try {
+                    const resp = await fetch('/enrich', {
+                        method: 'POST', headers: {'Content-Type': 'application/json'},
+                        body: JSON.stringify({ session_id: state.sessionId, items: state.items, indices: batch })
+                    });
+                    const data = await resp.json();
+                    data.enriched.forEach(e => { state.items[e.index] = e.item; });
+                } catch (err) { console.error('Enrich batch failed:', err); }
+            }
 
-function escHtml(s) { const d = document.createElement('div'); d.textContent = s; return d.innerHTML; }
+            renderTable();
+            updateStats();
+            loader.classList.remove('visible');
+            btn.disabled = false;
+            showToast(`Enriched ${needEnrich.length} items!`, 'success');
+        }
 
-function showToast(msg, type = 'info') {
-    const t = document.getElementById('toast');
-    t.textContent = msg;
-    t.className = 'toast ' + type;
-    t.style.display = 'block';
-    setTimeout(() => { t.style.display = 'none'; }, 4000);
-}
-</script>
+        // ── Export ────────────────────────────────────────────────────────────────
+        async function exportExcel() {
+            const btn = document.getElementById('exportBtn');
+            btn.disabled = true;
+            btn.innerHTML = '<i class="fas fa-spinner fa-spin"></i> Generating...';
+            try {
+                const resp = await fetch('/export', {
+                    method: 'POST', headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({ items: state.items })
+                });
+                if (!resp.ok) throw new Error('Export failed');
+                const blob = await resp.blob();
+                const url = URL.createObjectURL(blob);
+                const a = document.createElement('a'); a.href = url; a.download = 'DLX_Distribution_Offer.xlsx'; a.click();
+                URL.revokeObjectURL(url);
+                showToast('Excel file downloaded!', 'success');
+            } catch (err) { showToast('Export failed: ' + err.message, 'error'); }
+            finally { btn.disabled = false; btn.innerHTML = '<i class="fas fa-file-excel"></i> Download Excel (.xlsx)'; }
+        }
 
+        // ── Navigation ───────────────────────────────────────────────────────────
+        function goToStep(n) {
+            document.querySelectorAll('.panel').forEach(p => p.classList.remove('visible'));
+            document.getElementById('step' + n).classList.add('visible');
+            document.querySelectorAll('.step').forEach((s, i) => {
+                s.classList.remove('active', 'completed');
+                if (i + 1 < n) s.classList.add('completed');
+                if (i + 1 === n) s.classList.add('active');
+            });
+            window.scrollTo({ top: 0, behavior: 'smooth' });
+        }
+
+        // ── Utilities ────────────────────────────────────────────────────────────
+        function escHtml(s) { const d = document.createElement('div'); d.textContent = s; return d.innerHTML; }
+        function showToast(msg, type = 'info') {
+            const t = document.getElementById('toast');
+            t.textContent = msg; t.className = 'toast ' + type; t.style.display = 'block';
+            setTimeout(() => { t.style.display = 'none'; }, 4000);
+        }
+    </script>
 </body>
 </html>
