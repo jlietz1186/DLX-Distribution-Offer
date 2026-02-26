@@ -50,18 +50,61 @@ def parse_excel(filepath):
     for cell in ws[1]:
         headers.append(str(cell.value or f'Column_{cell.column}').strip())
 
-    # Check for embedded images and map to cells
+    # Extract embedded images and save them to temp files, mapped by (row, col)
     image_map = {}
     if hasattr(ws, '_images'):
-        for img in ws._images:
+        for img_idx, img in enumerate(ws._images):
             try:
                 anchor = img.anchor
                 if hasattr(anchor, '_from'):
                     row = anchor._from.row + 1  # 0-indexed to 1-indexed
                     col = anchor._from.col
-                    image_map[(row, col)] = True
-            except Exception:
-                pass
+                    # Extract image data and save to file
+                    img_data = None
+                    if hasattr(img, '_data'):
+                        img_data = img._data()
+                    elif hasattr(img, 'ref'):
+                        # Try reading from the image ref
+                        try:
+                            img_data = img.ref.read()
+                            img.ref.seek(0)
+                        except Exception:
+                            pass
+                    if not img_data:
+                        # Try the blob directly
+                        try:
+                            from openpyxl.drawing.image import _import_image
+                        except ImportError:
+                            pass
+                        try:
+                            buf = io.BytesIO()
+                            img_obj = img._data if callable(getattr(img, '_data', None)) else None
+                            if img_obj:
+                                img_data = img_obj()
+                        except Exception:
+                            pass
+
+                    if img_data and len(img_data) > 100:
+                        # Determine format from first bytes
+                        fmt = 'png'
+                        if img_data[:3] == b'\xff\xd8\xff':
+                            fmt = 'jpeg'
+                        elif img_data[:4] == b'\x89PNG':
+                            fmt = 'png'
+                        elif img_data[:4] == b'GIF8':
+                            fmt = 'gif'
+
+                        img_filename = f'extracted_{img_idx}_{row}_{col}.{fmt}'
+                        img_path = os.path.join(UPLOAD_FOLDER, img_filename)
+                        with open(img_path, 'wb') as f:
+                            f.write(img_data)
+                        image_map[(row, col)] = img_filename
+                        print(f'Extracted image for row={row}, col={col}: {img_filename} ({len(img_data)} bytes)')
+                    else:
+                        image_map[(row, col)] = True  # Image exists but couldn't extract data
+                        print(f'Image detected at row={row}, col={col} but could not extract data')
+            except Exception as e:
+                print(f'Image extraction error: {e}')
 
     for row_idx, row in enumerate(ws.iter_rows(min_row=2, values_only=False), start=2):
         row_data = {}
@@ -70,10 +113,16 @@ def parse_excel(filepath):
                 val = cell.value if cell.value is not None else ''
                 row_data[headers[col_idx]] = str(val).strip()
 
+                # Check for hyperlinks
                 if cell.hyperlink and cell.hyperlink.target:
                     hyperlinks[(row_idx, col_idx)] = cell.hyperlink.target
-                    if not row_data[headers[col_idx]] or row_data[headers[col_idx]] == str(val):
-                        row_data[headers[col_idx] + '__hyperlink'] = cell.hyperlink.target
+                    row_data[headers[col_idx] + '__hyperlink'] = cell.hyperlink.target
+
+                # Check if this cell has an extracted embedded image
+                img_file = image_map.get((row_idx, col_idx))
+                if img_file and isinstance(img_file, str):
+                    row_data[headers[col_idx] + '__embedded_image'] = img_file
+
         data.append(row_data)
 
     df = pd.DataFrame(data)
@@ -347,6 +396,16 @@ def index():
     return render_template('index.html')
 
 
+@app.route('/serve_image/<filename>')
+def serve_image(filename):
+    """Serve extracted images from uploaded files."""
+    safe = secure_filename(filename)
+    path = os.path.join(UPLOAD_FOLDER, safe)
+    if os.path.exists(path):
+        return send_file(path, mimetype='image/png')
+    return '', 404
+
+
 @app.route('/upload', methods=['POST'])
 def upload_file():
     if 'file' not in request.files:
@@ -367,7 +426,7 @@ def upload_file():
         df.to_json(cache_path, orient='records')
 
         source_columns = list(df.columns)
-        visible_columns = [c for c in source_columns if not c.endswith('__hyperlink')]
+        visible_columns = [c for c in source_columns if not c.endswith('__hyperlink') and not c.endswith('__embedded_image')]
         suggested_mapping = auto_map_columns(visible_columns)
         preview = df.head(5).to_dict(orient='records')
 
@@ -408,7 +467,7 @@ def process_data():
         if not item.get('Expiration') or item['Expiration'].lower() in ('', 'nan', 'none', 'null'):
             item['Expiration'] = 'NA'
 
-        # Check for hyperlinks in source
+        # Check for hyperlinks in source (Retail Link)
         src_link_col = mapping.get('Retail Link', '')
         if src_link_col:
             hyperlink_key = src_link_col + '__hyperlink'
@@ -421,6 +480,19 @@ def process_data():
             hyperlink_key = src_img_col + '__hyperlink'
             if hyperlink_key in df.columns and row.get(hyperlink_key):
                 item['Image'] = row[hyperlink_key]
+
+            # Check for embedded images extracted from the Excel file
+            embedded_key = src_img_col + '__embedded_image'
+            if embedded_key in df.columns and row.get(embedded_key):
+                # Serve the extracted image via our Flask route
+                item['Image'] = '/serve_image/' + row[embedded_key]
+
+        # Also check ALL columns for embedded images if Image is still empty
+        if not item.get('Image') or not item['Image'].startswith(('http', '/')):
+            for col_name in df.columns:
+                if col_name.endswith('__embedded_image') and row.get(col_name):
+                    item['Image'] = '/serve_image/' + row[col_name]
+                    break
 
         results.append(item)
 
@@ -448,8 +520,10 @@ def enrich_data():
         upc = item.get('UPC/Item #', '')
         name = item.get('Item Name', '')
 
-        # Look up image if missing
-        if not item.get('Image') or item['Image'].lower() in ('', 'na', 'nan') or item['Image'].startswith('http') == False:
+        # Look up image if missing or not a valid URL/path
+        img_val = item.get('Image', '')
+        needs_image = not img_val or (not img_val.startswith('http') and not img_val.startswith('/serve_image/'))
+        if needs_image:
             img_url = lookup_upc_image(upc)
             if not img_url:
                 img_url = search_product_image(name)
@@ -457,7 +531,8 @@ def enrich_data():
                 item['Image'] = img_url
 
         # Look up retail link if missing
-        if not item.get('Retail Link') or item['Retail Link'].lower() in ('', 'na', 'nan'):
+        link_val = item.get('Retail Link', '')
+        if not link_val or not link_val.startswith('http'):
             link = find_retail_link(upc=upc, name=name)
             item['Retail Link'] = link
 
@@ -511,32 +586,50 @@ def export_excel():
             cell = ws.cell(row=row_idx, column=col_idx)
             val = item.get(col_name, '')
 
-            if col_name == 'Image' and val and val.startswith('http'):
-                # Try to download and embed the image
+            if col_name == 'Image' and val:
                 img_embedded = False
-                try:
-                    img_data, fmt = download_image(val)
-                    if img_data:
-                        img_data, fmt = resize_image_bytes(img_data, max_width=120, max_height=100)
-                        img_path = os.path.join(UPLOAD_FOLDER, f'img_{row_idx}.{fmt}')
-                        with open(img_path, 'wb') as f:
-                            f.write(img_data)
+                img_path = None
+
+                # Check if it's a local extracted image
+                if val.startswith('/serve_image/'):
+                    local_filename = val.replace('/serve_image/', '')
+                    local_path = os.path.join(UPLOAD_FOLDER, secure_filename(local_filename))
+                    if os.path.exists(local_path):
+                        img_path = local_path
+
+                # Check if it's a remote URL
+                elif val.startswith('http'):
+                    try:
+                        img_data, fmt = download_image(val)
+                        if img_data:
+                            img_data, fmt = resize_image_bytes(img_data, max_width=120, max_height=100)
+                            dl_path = os.path.join(UPLOAD_FOLDER, f'img_{row_idx}.{fmt}')
+                            with open(dl_path, 'wb') as f:
+                                f.write(img_data)
+                            img_path = dl_path
+                    except Exception as e:
+                        print(f'Image download failed for row {row_idx}: {e}')
+
+                if img_path and os.path.exists(img_path):
+                    try:
                         img = XlImage(img_path)
-                        # Size the image to fit the cell
                         img.width = 100
                         img.height = 90
                         cell_ref = f'A{row_idx}'
                         ws.add_image(img, cell_ref)
-                        cell.value = ''  # Clear cell text since image is embedded
+                        cell.value = ''
                         img_embedded = True
-                except Exception as e:
-                    print(f'Image embed failed for row {row_idx}: {e}')
+                    except Exception as e:
+                        print(f'Image embed failed for row {row_idx}: {e}')
 
                 if not img_embedded:
-                    # Fallback to hyperlink
-                    cell.value = 'View Image'
-                    cell.hyperlink = val
-                    cell.font = link_font
+                    if val.startswith('http'):
+                        cell.value = 'View Image'
+                        cell.hyperlink = val
+                        cell.font = link_font
+                    else:
+                        cell.value = ''
+                        cell.font = cell_font
 
             elif col_name == 'Retail Link' and val and val.startswith('http'):
                 cell.value = 'View Product'
