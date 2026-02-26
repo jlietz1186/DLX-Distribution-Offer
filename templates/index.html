@@ -291,7 +291,9 @@
 
         // ── Table Rendering ──────────────────────────────────────────────────────
         function isValidImageUrl(val) {
-            return val && typeof val === 'string' && val.startsWith('http') && !val.includes('google.com/search');
+            if (!val || typeof val !== 'string') return false;
+            if (val.startsWith('/serve_image/')) return true;  // Local extracted image
+            return val.startsWith('http') && !val.includes('google.com/search');
         }
 
         function renderTable() {
@@ -359,9 +361,11 @@
             loader.classList.add('visible');
 
             // FIXED: Also enrich items where Image is non-empty but not a valid URL
+            // Skip items that already have local extracted images (/serve_image/)
             const needEnrich = [];
             state.items.forEach((item, i) => {
-                const noImg = !isValidImageUrl(item.Image);
+                const hasLocalImg = item.Image && item.Image.startsWith('/serve_image/');
+                const noImg = !hasLocalImg && !isValidImageUrl(item.Image);
                 const noLink = !item['Retail Link'] || !item['Retail Link'].startsWith('http');
                 if (noImg || noLink) needEnrich.push(i);
             });
