@@ -170,6 +170,44 @@ _lookup_cache = {}
 _api_rate_limited = {}
 
 
+def _resolve_redirect_url(url):
+    """Follow redirect URLs (like UPCitemdb's /noredir/) to get the actual destination.
+    Returns the final URL after redirects, or the original URL if resolution fails."""
+    if not url:
+        return url
+    # UPCitemdb redirect pattern: contains upcitemdb.com and a redirect param
+    # Also handle any generic redirect/tracking URLs
+    is_redirect = (
+        'upcitemdb.com' in url or
+        '/redirect?' in url or
+        '/noredir/' in url or
+        'go.redirectingat.com' in url
+    )
+    if not is_redirect:
+        return url
+    try:
+        # Use HEAD request with redirects to find final URL
+        resp = requests.head(url, headers=BROWSER_HEADERS, timeout=8, allow_redirects=True)
+        final_url = resp.url
+        if final_url and final_url != url:
+            print(f'Resolved redirect: {url[:80]} → {final_url[:80]}')
+            return final_url
+    except Exception as e:
+        print(f'Redirect resolution failed for {url[:80]}: {e}')
+    # Fallback: try to extract destination from URL params
+    try:
+        parsed = urllib.parse.urlparse(url)
+        params = urllib.parse.parse_qs(parsed.query)
+        for key in ('to', 'url', 'dest', 'redirect', 'target', 'u'):
+            if key in params:
+                dest = params[key][0]
+                if dest.startswith('http'):
+                    return dest
+    except Exception:
+        pass
+    return url
+
+
 def _is_product_page_url(url):
     """Check if a URL is an actual product page (not a search/listing page).
     Returns (clean_url, source) or (None, None)."""
@@ -467,22 +505,25 @@ def lookup_product_info(upc=None, name=None):
                         if not link:
                             continue
 
+                        # Resolve redirect URLs (UPCitemdb uses redirect/tracking URLs)
+                        link = _resolve_redirect_url(link)
+
                         # Try to clean up to a canonical product URL
-                        product_url, _ = _is_product_page_url(link)
+                        product_url, url_source = _is_product_page_url(link)
                         if product_url:
                             link = product_url
 
                         # Check against priority list
                         for idx, retailer in enumerate(RETAIL_PRIORITY):
-                            if retailer in merchant:
+                            if retailer in merchant or (url_source and retailer in url_source.lower()):
                                 if idx < best_priority:
                                     best_priority = idx
                                     best_link = link
-                                    result['source'] = retailer.capitalize()
+                                    result['source'] = url_source or retailer.capitalize()
                                 break
                         else:
-                            # Not in priority list — keep as fallback
-                            if not fallback_link:
+                            # Not in priority list — keep as fallback only if it's a real retailer URL
+                            if not fallback_link and not 'upcitemdb.com' in link:
                                 fallback_link = link
 
                     result['retail_link'] = best_link or fallback_link
