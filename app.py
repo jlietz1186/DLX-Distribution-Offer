@@ -795,6 +795,69 @@ def process_data():
     return jsonify({'results': results, 'session_id': session_id})
 
 
+@app.route('/debug_lookup')
+def debug_lookup():
+    """Temporary debug endpoint to diagnose API lookup failures."""
+    import traceback
+    upc = request.args.get('upc', '805106960230')
+    name = request.args.get('name', 'Mini Light')
+    results = {'upc': upc, 'name': name, 'tests': {}}
+
+    upc_clean = re.sub(r'[^0-9]', '', str(upc))
+
+    # Test 1: UPCitemdb
+    try:
+        resp = requests.get(
+            f'https://api.upcitemdb.com/prod/trial/lookup?upc={upc_clean}',
+            timeout=10, headers={'Accept': 'application/json'}
+        )
+        results['tests']['upcitemdb'] = {
+            'status_code': resp.status_code,
+            'body_preview': resp.text[:500],
+            'items_count': len(resp.json().get('items', [])) if resp.status_code == 200 else None
+        }
+    except Exception as e:
+        results['tests']['upcitemdb'] = {'error': str(e), 'traceback': traceback.format_exc()}
+
+    # Test 2: Open Food Facts
+    try:
+        resp = requests.get(
+            f'https://world.openfoodfacts.org/api/v0/product/{upc_clean}.json',
+            timeout=10
+        )
+        results['tests']['openfoodfacts'] = {
+            'status_code': resp.status_code,
+            'status_field': resp.json().get('status') if resp.status_code == 200 else None
+        }
+    except Exception as e:
+        results['tests']['openfoodfacts'] = {'error': str(e)}
+
+    # Test 3: DuckDuckGo
+    try:
+        q = f'{upc_clean} site:amazon.com'
+        resp = requests.get(
+            f'https://html.duckduckgo.com/html/?q={urllib.parse.quote_plus(q)}',
+            headers=BROWSER_HEADERS, timeout=10
+        )
+        results['tests']['duckduckgo'] = {
+            'status_code': resp.status_code,
+            'body_length': len(resp.text),
+            'body_preview': resp.text[:500],
+            'has_results': 'result__a' in resp.text
+        }
+    except Exception as e:
+        results['tests']['duckduckgo'] = {'error': str(e)}
+
+    # Test 4: Full lookup_product_info
+    try:
+        info = lookup_product_info(upc=upc, name=name)
+        results['tests']['lookup_product_info'] = info
+    except Exception as e:
+        results['tests']['lookup_product_info'] = {'error': str(e), 'traceback': traceback.format_exc()}
+
+    return jsonify(results)
+
+
 @app.route('/enrich', methods=['POST'])
 def enrich_data():
     """Look up images, retail links, and product titles for items that need them."""
