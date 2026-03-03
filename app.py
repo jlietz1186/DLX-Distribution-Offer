@@ -57,55 +57,107 @@ def parse_excel(filepath):
         for img_idx, img in enumerate(ws._images):
             try:
                 anchor = img.anchor
+                # Get row/col from anchor — handle different anchor types
+                row = None
+                col = None
                 if hasattr(anchor, '_from'):
                     row = anchor._from.row + 1  # 0-indexed to 1-indexed
                     col = anchor._from.col
-                    # Extract image data and save to file
-                    img_data = None
-                    if hasattr(img, '_data'):
+                elif hasattr(anchor, 'pos'):
+                    # AbsoluteAnchor — estimate row from position
+                    pass
+                if row is None:
+                    print(f'Image {img_idx}: could not determine row/col from anchor type {type(anchor).__name__}')
+                    continue
+
+                # Extract image data — try multiple approaches
+                img_data = None
+
+                # Approach 1: _data() method (most common in openpyxl)
+                if hasattr(img, '_data') and callable(img._data):
+                    try:
                         img_data = img._data()
-                    elif hasattr(img, 'ref'):
-                        # Try reading from the image ref
-                        try:
+                    except Exception:
+                        pass
+
+                # Approach 2: ref attribute (file-like object)
+                if not img_data and hasattr(img, 'ref'):
+                    try:
+                        if hasattr(img.ref, 'read'):
                             img_data = img.ref.read()
                             img.ref.seek(0)
-                        except Exception:
-                            pass
-                    if not img_data:
-                        # Try the blob directly
-                        try:
-                            from openpyxl.drawing.image import _import_image
-                        except ImportError:
-                            pass
-                        try:
-                            buf = io.BytesIO()
-                            img_obj = img._data if callable(getattr(img, '_data', None)) else None
-                            if img_obj:
-                                img_data = img_obj()
-                        except Exception:
-                            pass
+                        elif isinstance(img.ref, bytes):
+                            img_data = img.ref
+                    except Exception:
+                        pass
 
-                    if img_data and len(img_data) > 100:
-                        # Determine format from first bytes
+                # Approach 3: _blob attribute
+                if not img_data and hasattr(img, '_blob'):
+                    try:
+                        img_data = img._blob
+                    except Exception:
+                        pass
+
+                # Approach 4: Use PIL to re-export if we have a path
+                if not img_data and hasattr(img, 'path'):
+                    try:
+                        from PIL import Image as PILImage
+                        from zipfile import ZipFile
+                        # Images are stored inside the xlsx (which is a zip)
+                        with ZipFile(filepath, 'r') as zf:
+                            img_path_in_zip = img.path.lstrip('/')
+                            if img_path_in_zip.startswith('xl/'):
+                                pass
+                            else:
+                                img_path_in_zip = 'xl/' + img_path_in_zip
+                            try:
+                                img_data = zf.read(img_path_in_zip)
+                            except KeyError:
+                                # Try without xl/ prefix
+                                try:
+                                    img_data = zf.read(img.path.lstrip('/'))
+                                except KeyError:
+                                    pass
+                    except Exception:
+                        pass
+
+                if img_data and len(img_data) > 100:
+                    # Determine format from first bytes
+                    fmt = 'png'
+                    if img_data[:3] == b'\xff\xd8\xff':
+                        fmt = 'jpeg'
+                    elif img_data[:4] == b'\x89PNG':
                         fmt = 'png'
-                        if img_data[:3] == b'\xff\xd8\xff':
-                            fmt = 'jpeg'
-                        elif img_data[:4] == b'\x89PNG':
-                            fmt = 'png'
-                        elif img_data[:4] == b'GIF8':
-                            fmt = 'gif'
+                    elif img_data[:4] == b'GIF8':
+                        fmt = 'gif'
+                    elif img_data[:4] == b'RIFF':
+                        fmt = 'webp'
+                    elif img_data[:4] == b'<svg' or b'<svg' in img_data[:100]:
+                        fmt = 'svg'
 
-                        img_filename = f'extracted_{img_idx}_{row}_{col}.{fmt}'
-                        img_path = os.path.join(UPLOAD_FOLDER, img_filename)
-                        with open(img_path, 'wb') as f:
-                            f.write(img_data)
-                        image_map[(row, col)] = img_filename
-                        print(f'Extracted image for row={row}, col={col}: {img_filename} ({len(img_data)} bytes)')
-                    else:
-                        image_map[(row, col)] = True  # Image exists but couldn't extract data
-                        print(f'Image detected at row={row}, col={col} but could not extract data')
+                    # Convert webp/svg to png for compatibility
+                    if fmt in ('webp', 'svg'):
+                        try:
+                            from PIL import Image as PILImage
+                            pil_img = PILImage.open(io.BytesIO(img_data))
+                            buf = io.BytesIO()
+                            pil_img.save(buf, format='PNG')
+                            img_data = buf.getvalue()
+                            fmt = 'png'
+                        except Exception:
+                            pass
+
+                    img_filename = f'extracted_{img_idx}_{row}_{col}.{fmt}'
+                    img_path = os.path.join(UPLOAD_FOLDER, img_filename)
+                    with open(img_path, 'wb') as f:
+                        f.write(img_data)
+                    image_map[(row, col)] = img_filename
+                    print(f'Extracted image for row={row}, col={col}: {img_filename} ({len(img_data)} bytes)')
+                else:
+                    image_map[(row, col)] = True  # Image exists but couldn't extract data
+                    print(f'Image detected at row={row}, col={col} but could not extract data (size={len(img_data) if img_data else 0})')
             except Exception as e:
-                print(f'Image extraction error: {e}')
+                print(f'Image extraction error for img {img_idx}: {e}')
 
     for row_idx, row in enumerate(ws.iter_rows(min_row=2, values_only=False), start=2):
         row_data = {}
@@ -370,6 +422,65 @@ def _fetch_product_title_from_page(url):
                 return t.strip()
     except Exception as e:
         print(f'Page fetch error for {url}: {e}')
+    return None
+
+
+def _fetch_product_image_from_page(url):
+    """Fetch a product page and extract the main product image URL.
+    Returns image URL string or None."""
+    try:
+        resp = requests.get(url, headers=BROWSER_HEADERS, timeout=10, allow_redirects=True)
+        if resp.status_code != 200:
+            return None
+        soup = BeautifulSoup(resp.text, 'html.parser')
+
+        # Amazon: main product image
+        if 'amazon.com' in url:
+            el = soup.find('img', id='landingImage')
+            if el and el.get('src', '').startswith('http'):
+                return el['src']
+            # Fallback: look for data-old-hires attribute
+            if el and el.get('data-old-hires', '').startswith('http'):
+                return el['data-old-hires']
+
+        # Walmart: product image
+        if 'walmart.com' in url:
+            el = soup.find('img', {'data-testid': 'hero-image'})
+            if not el:
+                el = soup.find('img', itemprop='image')
+            if el and el.get('src', '').startswith('http'):
+                return el['src']
+
+        # Target: product image
+        if 'target.com' in url:
+            el = soup.find('img', {'data-test': 'product-image'})
+            if el and el.get('src', '').startswith('http'):
+                return el['src']
+
+        # Home Depot: product image
+        if 'homedepot.com' in url:
+            el = soup.find('img', class_='stretchy')
+            if not el:
+                el = soup.find('img', id='mainImage')
+            if el and el.get('src', '').startswith('http'):
+                return el['src']
+
+        # Generic: try og:image meta tag (most retail sites have this)
+        og_img = soup.find('meta', property='og:image')
+        if og_img and og_img.get('content', '').startswith('http'):
+            return og_img['content']
+
+        # Fallback: try itemprop="image"
+        item_img = soup.find('img', itemprop='image')
+        if item_img and item_img.get('src', '').startswith('http'):
+            return item_img['src']
+        # itemprop on a link/meta
+        item_meta = soup.find('meta', itemprop='image')
+        if item_meta and item_meta.get('content', '').startswith('http'):
+            return item_meta['content']
+
+    except Exception as e:
+        print(f'Image scrape error for {url}: {e}')
     return None
 
 
@@ -1021,6 +1132,21 @@ def enrich_data():
                 item['Retail Link'] = product_url
             elif not is_search_page:
                 item['Retail Link'] = retail_url
+
+        # ── Image from retail link fallback ──
+        # If we still have no image but DO have a retail link, try scraping the
+        # product image directly from the retail page
+        img_val_now = item.get('Image', '')
+        still_needs_image = not img_val_now or (not img_val_now.startswith('http') and not img_val_now.startswith('/serve_image/'))
+        retail_link_now = item.get('Retail Link', '')
+        if still_needs_image and retail_link_now and retail_link_now.startswith('http'):
+            try:
+                scraped_img = _fetch_product_image_from_page(retail_link_now)
+                if scraped_img:
+                    item['Image'] = scraped_img
+                    print(f'Scraped image from retail page: {retail_link_now[:60]} → {scraped_img[:80]}')
+            except Exception as e:
+                print(f'Image scrape failed for {retail_link_now[:60]}: {e}')
 
         enriched.append({'index': i, 'item': item})
 
