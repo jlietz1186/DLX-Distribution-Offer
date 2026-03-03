@@ -218,8 +218,28 @@ BROWSER_HEADERS = {
 
 # Simple in-memory cache to avoid burning rate limits on repeat lookups
 _lookup_cache = {}
-# Track which APIs are rate-limited so we stop hitting them
+# Track which APIs are rate-limited — stores timestamp when rate limit was hit
+# so we can reset after a cooldown period
 _api_rate_limited = {}
+_RATE_LIMIT_COOLDOWN = 600  # 10 minutes before retrying a rate-limited API
+
+import time
+
+def _is_rate_limited(api_name):
+    """Check if an API is currently rate-limited, with automatic cooldown reset."""
+    if api_name not in _api_rate_limited:
+        return False
+    hit_time = _api_rate_limited[api_name]
+    if time.time() - hit_time > _RATE_LIMIT_COOLDOWN:
+        print(f'{api_name} rate limit cooldown expired — retrying')
+        del _api_rate_limited[api_name]
+        return False
+    return True
+
+def _set_rate_limited(api_name):
+    """Mark an API as rate-limited with current timestamp."""
+    _api_rate_limited[api_name] = time.time()
+    print(f'{api_name} rate limited — will retry after {_RATE_LIMIT_COOLDOWN}s cooldown')
 
 
 def _resolve_redirect_url(url):
@@ -331,6 +351,13 @@ SEARXNG_INSTANCES = [
     'https://search.ononoki.org',
     'https://searx.oxf.app',
     'https://paulgo.io',
+    'https://search.nqdev.ch',
+    'https://searx.work',
+    'https://search.hbubli.cc',
+    'https://searx.foss.family',
+    'https://search.mdosch.de',
+    'https://searx.namejeff.xyz',
+    'https://etsi.me',
 ]
 
 
@@ -702,7 +729,7 @@ def lookup_product_info(upc=None, name=None):
         return _lookup_cache[cache_key].copy()
 
     # ── 1. UPCitemdb (best source — returns title, images, and offers in one call) ──
-    if has_upc and not _api_rate_limited.get('upcitemdb'):
+    if has_upc and not _is_rate_limited('upcitemdb'):
         try:
             resp = requests.get(
                 f'https://api.upcitemdb.com/prod/trial/lookup?upc={upc_clean}',
@@ -711,7 +738,7 @@ def lookup_product_info(upc=None, name=None):
             )
             if resp.status_code == 429:
                 print('UPCitemdb rate limited — skipping for remaining items')
-                _api_rate_limited['upcitemdb'] = True
+                _set_rate_limited('upcitemdb')
             elif resp.status_code == 200:
                 data = resp.json()
                 items = data.get('items', [])
