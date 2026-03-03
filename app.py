@@ -334,7 +334,7 @@ SEARXNG_INSTANCES = [
 ]
 
 
-def _search_searxng(query):
+def _search_searxng(query, categories='general'):
     """Search using SearXNG public instances (JSON API).
     Tries multiple instances for reliability.
     Returns (url, title, source) or (None, None, None)."""
@@ -350,7 +350,7 @@ def _search_searxng(query):
                 params={
                     'q': query,
                     'format': 'json',
-                    'categories': 'general',
+                    'categories': categories,
                     'language': 'en',
                 },
                 headers=BROWSER_HEADERS,
@@ -377,6 +377,84 @@ def _search_searxng(query):
                 print(f'SearXNG ({instance}) returned status {resp.status_code}')
         except Exception as e:
             print(f'SearXNG ({instance}) error: {e}')
+            continue
+
+    return None, None, None
+
+
+def _search_retailer_directly(upc, name=None):
+    """Search major retailer websites directly by UPC/name and scrape product links.
+    This bypasses search engine limitations by going straight to retailer search pages.
+    Returns (url, title, source) or (None, None, None)."""
+
+    upc_clean = re.sub(r'[^0-9]', '', str(upc)) if upc else ''
+    search_term = upc_clean if upc_clean else str(name or '').strip()
+    if not search_term:
+        return None, None, None
+
+    # Retailer search URLs — these are the internal search pages
+    retailer_searches = [
+        {
+            'name': 'Walmart',
+            'url': f'https://www.walmart.com/search?q={urllib.parse.quote_plus(search_term)}',
+            'product_pattern': r'walmart\.com/ip/',
+        },
+        {
+            'name': 'Amazon',
+            'url': f'https://www.amazon.com/s?k={urllib.parse.quote_plus(search_term)}',
+            'product_pattern': r'amazon\.com.*/dp/[A-Z0-9]{10}',
+        },
+        {
+            'name': 'Target',
+            'url': f'https://www.target.com/s?searchTerm={urllib.parse.quote_plus(search_term)}',
+            'product_pattern': r'target\.com/.*/-/A-\d+',
+        },
+    ]
+
+    for retailer in retailer_searches:
+        try:
+            resp = requests.get(
+                retailer['url'],
+                headers=BROWSER_HEADERS,
+                timeout=10,
+                allow_redirects=True
+            )
+            if resp.status_code != 200:
+                print(f"Direct {retailer['name']} search returned {resp.status_code}")
+                continue
+
+            # Check if we were redirected directly to a product page
+            final_url = resp.url
+            clean_url, source = _is_product_page_url(final_url)
+            if clean_url:
+                print(f"Direct {retailer['name']} search redirected to product: {clean_url}")
+                return clean_url, None, source
+
+            # Parse the search results page for product links
+            soup = BeautifulSoup(resp.text, 'html.parser')
+            product_links = set()
+
+            # Find all links matching product page patterns
+            for a in soup.find_all('a', href=True):
+                href = a['href']
+                # Make relative URLs absolute
+                if href.startswith('/'):
+                    parsed = urllib.parse.urlparse(retailer['url'])
+                    href = f'{parsed.scheme}://{parsed.netloc}{href}'
+                if re.search(retailer['product_pattern'], href):
+                    clean_url, source = _is_product_page_url(href)
+                    if clean_url:
+                        product_links.add((clean_url, source))
+
+            if product_links:
+                # Return the first product link found
+                url, source = list(product_links)[0]
+                print(f"Direct {retailer['name']} search found product: {url}")
+                return url, None, source
+
+            print(f"Direct {retailer['name']} search: no product links found in results")
+        except Exception as e:
+            print(f"Direct {retailer['name']} search error: {e}")
             continue
 
     return None, None, None
@@ -513,7 +591,9 @@ def _name_similarity(name1, name2):
 
 
 def search_product_on_web(upc=None, name=None):
-    """Search for a product on major retail sites using SearXNG.
+    """Search for a product on major retail sites using multiple strategies:
+    1. SearXNG meta-search (general + shopping categories)
+    2. Direct retailer website search (scrape Walmart/Amazon/Target search pages)
     ONLY returns results that are actual product pages.
     Returns dict with keys: url, title, source."""
     result = {'url': None, 'title': None, 'source': None}
@@ -521,24 +601,26 @@ def search_product_on_web(upc=None, name=None):
     upc_clean = re.sub(r'[^0-9]', '', str(upc)) if upc else ''
     has_upc = bool(upc_clean) and upc_clean not in ('0', '')
 
-    # Build search queries — try UPC first, then name-based
+    # ── Strategy 1: SearXNG meta-search with multiple query patterns ──
     queries = []
     if has_upc:
-        queries.append(f'{upc_clean} buy')
-        queries.append(f'{upc_clean} amazon walmart target')
+        # UPC-based queries — multiple patterns for better coverage
+        queries.append((f'{upc_clean}', 'general'))
+        queries.append((f'{upc_clean} buy', 'general'))
+        queries.append((f'{upc_clean}', 'shopping'))  # Shopping category often has better product results
+        queries.append((f'UPC {upc_clean}', 'general'))
     if name:
         clean_name = str(name).strip()
         if clean_name:
-            queries.append(f'{clean_name} buy amazon')
-            queries.append(f'{clean_name} walmart OR target OR "home depot"')
+            queries.append((f'{clean_name} buy', 'general'))
+            queries.append((f'{clean_name}', 'shopping'))
+            queries.append((f'{clean_name} amazon walmart target', 'general'))
 
-    for query in queries:
+    for query, category in queries:
         try:
-            url, snippet_title, source = _search_searxng(query)
+            url, snippet_title, source = _search_searxng(query, categories=category)
             if url:
                 # ALWAYS fetch the real product title from the actual page.
-                # SearXNG snippet titles are often wrong or describe a different
-                # product than the URL points to.
                 page_title = _fetch_product_title_from_page(url)
                 title = page_title if page_title else snippet_title
                 print(f'Web search: snippet="{snippet_title}" → page="{page_title}" for {url}')
@@ -555,6 +637,51 @@ def search_product_on_web(upc=None, name=None):
         except Exception as e:
             print(f'SearXNG search failed for "{query}": {e}')
             continue
+
+    # ── Strategy 2: Direct retailer website search ──
+    # Search Walmart/Amazon/Target directly — this works even when SearXNG
+    # can't find results, because retailers index products by UPC internally
+    if has_upc or name:
+        try:
+            direct_url, _, direct_source = _search_retailer_directly(upc, name)
+            if direct_url:
+                # Fetch real title from the product page
+                page_title = _fetch_product_title_from_page(direct_url)
+                print(f'Direct retailer search found: {direct_url} — title="{page_title}"')
+
+                # Validate if we have an original name
+                if name and page_title:
+                    sim = _name_similarity(name, page_title)
+                    if sim < 0.2:
+                        print(f'Direct search result rejected (sim={sim:.2f}): "{page_title}" vs "{name}"')
+                    else:
+                        result = {'url': direct_url, 'title': page_title, 'source': direct_source}
+                        return result
+                else:
+                    result = {'url': direct_url, 'title': page_title, 'source': direct_source}
+                    return result
+        except Exception as e:
+            print(f'Direct retailer search failed: {e}')
+
+    # ── Strategy 3: If UPC search failed but we have a name, try name on retailers directly ──
+    if not result['url'] and name and has_upc:
+        try:
+            direct_url, _, direct_source = _search_retailer_directly(None, name)
+            if direct_url:
+                page_title = _fetch_product_title_from_page(direct_url)
+                print(f'Direct retailer name search found: {direct_url} — title="{page_title}"')
+                if page_title:
+                    sim = _name_similarity(name, page_title)
+                    if sim >= 0.2:
+                        result = {'url': direct_url, 'title': page_title, 'source': direct_source}
+                        return result
+                    else:
+                        print(f'Direct name search rejected (sim={sim:.2f}): "{page_title}" vs "{name}"')
+                else:
+                    result = {'url': direct_url, 'title': page_title, 'source': direct_source}
+                    return result
+        except Exception as e:
+            print(f'Direct retailer name search failed: {e}')
 
     return result
 
@@ -1045,6 +1172,32 @@ def debug_lookup():
         }
     except Exception as e:
         results['tests']['searxng_name'] = {'error': str(e)}
+
+    # Test 3c: SearXNG shopping category
+    try:
+        q = f'{upc_clean}'
+        url3, snippet_title3, source3 = _search_searxng(q, categories='shopping')
+        results['tests']['searxng_shopping'] = {
+            'query': q,
+            'found_url': url3,
+            'snippet_title': snippet_title3,
+            'found_source': source3,
+        }
+    except Exception as e:
+        results['tests']['searxng_shopping'] = {'error': str(e)}
+
+    # Test 3d: Direct retailer search
+    try:
+        d_url, d_title, d_source = _search_retailer_directly(upc, name)
+        d_page_title = _fetch_product_title_from_page(d_url) if d_url else None
+        results['tests']['direct_retailer_search'] = {
+            'search_term': upc_clean or name,
+            'found_url': d_url,
+            'page_title': d_page_title,
+            'found_source': d_source,
+        }
+    except Exception as e:
+        results['tests']['direct_retailer_search'] = {'error': str(e), 'traceback': traceback.format_exc()}
 
     # Test 4: Full lookup_product_info
     try:
