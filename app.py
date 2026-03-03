@@ -6,6 +6,7 @@ from openpyxl.styles import Font, Alignment, PatternFill, Border, Side
 from openpyxl.utils import get_column_letter
 from openpyxl.drawing.image import Image as XlImage
 import requests
+from bs4 import BeautifulSoup
 from werkzeug.utils import secure_filename
 
 app = Flask(__name__)
@@ -155,6 +156,140 @@ def parse_pdf(filepath):
 # ── Product Lookup Services ──────────────────────────────────────────────────
 # Priority order for retail sources (1st tier)
 RETAIL_PRIORITY = ['amazon', 'walmart', 'target', 'costco', 'kroger', 'walgreens', 'cvs', 'ebay', 'bestbuy', 'homedepot']
+
+# Browser-like headers for web scraping
+BROWSER_HEADERS = {
+    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
+    'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
+    'Accept-Language': 'en-US,en;q=0.5',
+}
+
+
+def _parse_ddg_url(href):
+    """Extract actual URL from DuckDuckGo redirect link."""
+    if 'uddg=' in href:
+        match = re.search(r'uddg=([^&]+)', href)
+        if match:
+            return urllib.parse.unquote(match.group(1))
+    if href.startswith('http'):
+        return href
+    return None
+
+
+def _search_duckduckgo(query):
+    """Search DuckDuckGo HTML and return first retail product result.
+    Returns (url, title, source) or (None, None, None)."""
+    try:
+        q = urllib.parse.quote_plus(query)
+        resp = requests.get(
+            f'https://html.duckduckgo.com/html/?q={q}',
+            headers=BROWSER_HEADERS,
+            timeout=10
+        )
+        if resp.status_code == 200:
+            soup = BeautifulSoup(resp.text, 'html.parser')
+            for result in soup.find_all('a', class_='result__a'):
+                href = result.get('href', '')
+                title = result.get_text(strip=True)
+                actual_url = _parse_ddg_url(href)
+                if not actual_url:
+                    continue
+
+                # Check if it's an Amazon product page (has /dp/ASIN)
+                amazon_match = re.search(r'amazon\.com.*/dp/([A-Z0-9]{10})', actual_url)
+                if amazon_match:
+                    asin = amazon_match.group(1)
+                    clean_url = f'https://www.amazon.com/dp/{asin}'
+                    # Clean up title (remove "Amazon.com: " prefix if present)
+                    title = re.sub(r'^Amazon\.com\s*[:\-]\s*', '', title).strip()
+                    return clean_url, title, 'Amazon'
+
+                # Check Walmart product page (has /ip/)
+                walmart_match = re.search(r'walmart\.com.*/ip/[^?]+', actual_url)
+                if walmart_match:
+                    clean_url = walmart_match.group(0)
+                    if not clean_url.startswith('http'):
+                        clean_url = 'https://www.' + clean_url
+                    title = re.sub(r'^Walmart\.com\s*[:\-]\s*', '', title).strip()
+                    return clean_url, title, 'Walmart'
+
+                # Check Target product page (has /-/A-)
+                target_match = re.search(r'target\.com.*/-/A-\d+', actual_url)
+                if target_match:
+                    title = re.sub(r'^Target\s*[:\-]\s*', '', title).strip()
+                    return actual_url.split('?')[0], title, 'Target'
+    except Exception as e:
+        print(f'DuckDuckGo search error: {e}')
+
+    return None, None, None
+
+
+def _fetch_product_title_from_page(url):
+    """Fetch a product page and extract the title. Returns title string or None."""
+    try:
+        resp = requests.get(url, headers=BROWSER_HEADERS, timeout=10, allow_redirects=True)
+        if resp.status_code == 200:
+            soup = BeautifulSoup(resp.text, 'html.parser')
+
+            # Amazon product title
+            if 'amazon.com' in url:
+                el = soup.find('span', id='productTitle')
+                if el:
+                    return el.get_text(strip=True)
+
+            # Walmart product title
+            if 'walmart.com' in url:
+                el = soup.find('h1', itemprop='name') or soup.find('h1')
+                if el:
+                    return el.get_text(strip=True)
+
+            # Target product title
+            if 'target.com' in url:
+                el = soup.find('h1') or soup.find('title')
+                if el:
+                    t = el.get_text(strip=True)
+                    return re.sub(r'\s*[:\-|]\s*Target$', '', t)
+
+            # Generic: use <title> tag
+            title_tag = soup.find('title')
+            if title_tag:
+                return title_tag.get_text(strip=True)
+    except Exception as e:
+        print(f'Page fetch error for {url}: {e}')
+    return None
+
+
+def search_product_on_web(upc=None, name=None):
+    """Search DuckDuckGo for a product on major retail sites.
+    Returns dict with keys: url, title, source."""
+    result = {'url': None, 'title': None, 'source': None}
+
+    upc_clean = re.sub(r'[^0-9]', '', str(upc)) if upc else ''
+    has_upc = bool(upc_clean) and upc_clean not in ('0', '')
+
+    # Build list of search queries to try (in priority order)
+    queries = []
+    if has_upc:
+        queries.append(f'{upc_clean} site:amazon.com')
+        queries.append(f'{upc_clean} site:walmart.com')
+        queries.append(f'{upc_clean} site:target.com')
+    if name:
+        clean_name = str(name).strip()
+        queries.append(f'{clean_name} site:amazon.com')
+        queries.append(f'{clean_name} site:walmart.com')
+
+    for query in queries:
+        url, title, source = _search_duckduckgo(query)
+        if url:
+            # If we got a URL but the title looks like a search snippet, fetch the actual page
+            if not title or len(title) < 5 or title.lower().startswith('amazon') or title.lower().startswith('walmart'):
+                page_title = _fetch_product_title_from_page(url)
+                if page_title:
+                    title = page_title
+            result = {'url': url, 'title': title, 'source': source}
+            break
+
+    return result
 
 
 def lookup_product_info(upc=None, name=None):
@@ -321,7 +456,19 @@ def lookup_product_info(upc=None, name=None):
         except Exception:
             pass
 
-    # ── 6. Fallback retail link: Amazon search URL ──
+    # ── 6. Web search fallback: find actual product page (not just search URL) ──
+    needs_link = not result['retail_link']
+    needs_title = not result['title']
+    if needs_link or needs_title:
+        web_result = search_product_on_web(upc=upc, name=name)
+        if web_result['url'] and needs_link:
+            result['retail_link'] = web_result['url']
+        if web_result['title'] and needs_title:
+            result['title'] = web_result['title']
+        if web_result['source'] and not result['source']:
+            result['source'] = web_result['source']
+
+    # ── 7. Last resort: Amazon search URL (only if everything else failed) ──
     if not result['retail_link']:
         if has_upc:
             result['retail_link'] = f'https://www.amazon.com/s?k={upc_clean}'
