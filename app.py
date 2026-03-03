@@ -164,6 +164,11 @@ BROWSER_HEADERS = {
     'Accept-Language': 'en-US,en;q=0.5',
 }
 
+# Simple in-memory cache to avoid burning rate limits on repeat lookups
+_lookup_cache = {}
+# Track which APIs are rate-limited so we stop hitting them
+_api_rate_limited = {}
+
 
 def _parse_ddg_url(href):
     """Extract actual URL from DuckDuckGo redirect link."""
@@ -264,8 +269,92 @@ def _search_duckduckgo(query):
                     # Remove trailing site names
                     title = re.sub(r'\s*[:\-–|]\s*(Amazon\.com|Walmart|Target|Home Depot|Costco|Best Buy|eBay)\s*$', '', title).strip()
                     return clean_url, title, source
+        else:
+            print(f'DuckDuckGo returned status {resp.status_code}')
     except Exception as e:
         print(f'DuckDuckGo search error: {e}')
+
+    return None, None, None
+
+
+def _search_google(query):
+    """Search Google and return first actual product page result.
+    Returns (url, title, source) or (None, None, None)."""
+    try:
+        q = urllib.parse.quote_plus(query)
+        resp = requests.get(
+            f'https://www.google.com/search?q={q}&num=10',
+            headers={
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
+                'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+                'Accept-Language': 'en-US,en;q=0.9',
+            },
+            timeout=10
+        )
+        if resp.status_code == 200:
+            soup = BeautifulSoup(resp.text, 'html.parser')
+            # Google results are in <a> tags with href containing /url?q=ACTUAL_URL
+            for a_tag in soup.find_all('a', href=True):
+                href = a_tag['href']
+                # Extract real URL from Google redirect
+                actual_url = None
+                if href.startswith('/url?q='):
+                    match = re.match(r'/url\?q=([^&]+)', href)
+                    if match:
+                        actual_url = urllib.parse.unquote(match.group(1))
+                elif href.startswith('http') and 'google.' not in href:
+                    actual_url = href
+
+                if not actual_url:
+                    continue
+
+                clean_url, source = _is_product_page_url(actual_url)
+                if clean_url and source:
+                    # Try to get title from the link text or parent
+                    title = a_tag.get_text(strip=True)
+                    title = re.sub(r'^(Amazon\.com|Walmart\.com|Target|Home Depot|Costco)\s*[:\-–]\s*', '', title).strip()
+                    title = re.sub(r'\s*[:\-–|]\s*(Amazon\.com|Walmart|Target|Home Depot|Costco|Best Buy|eBay)\s*$', '', title).strip()
+                    if title and len(title) > 3:
+                        return clean_url, title, source
+                    else:
+                        return clean_url, None, source
+        else:
+            print(f'Google returned status {resp.status_code}')
+    except Exception as e:
+        print(f'Google search error: {e}')
+
+    return None, None, None
+
+
+def _search_bing(query):
+    """Search Bing and return first actual product page result.
+    Returns (url, title, source) or (None, None, None)."""
+    try:
+        q = urllib.parse.quote_plus(query)
+        resp = requests.get(
+            f'https://www.bing.com/search?q={q}',
+            headers=BROWSER_HEADERS,
+            timeout=10
+        )
+        if resp.status_code == 200:
+            soup = BeautifulSoup(resp.text, 'html.parser')
+            for a_tag in soup.find_all('a', href=True):
+                href = a_tag['href']
+                if not href.startswith('http') or 'bing.com' in href or 'microsoft.com' in href:
+                    continue
+                clean_url, source = _is_product_page_url(href)
+                if clean_url and source:
+                    title = a_tag.get_text(strip=True)
+                    title = re.sub(r'^(Amazon\.com|Walmart\.com|Target|Home Depot|Costco)\s*[:\-–]\s*', '', title).strip()
+                    title = re.sub(r'\s*[:\-–|]\s*(Amazon\.com|Walmart|Target|Home Depot|Costco|Best Buy|eBay)\s*$', '', title).strip()
+                    if title and len(title) > 3:
+                        return clean_url, title, source
+                    else:
+                        return clean_url, None, source
+        else:
+            print(f'Bing returned status {resp.status_code}')
+    except Exception as e:
+        print(f'Bing search error: {e}')
 
     return None, None, None
 
@@ -342,7 +431,8 @@ def _name_similarity(name1, name2):
 
 
 def search_product_on_web(upc=None, name=None):
-    """Search DuckDuckGo for a product on major retail sites.
+    """Search multiple search engines for a product on major retail sites.
+    Tries DuckDuckGo, Google, and Bing in sequence.
     ONLY returns results that are actual product pages.
     Returns dict with keys: url, title, source."""
     result = {'url': None, 'title': None, 'source': None}
@@ -350,43 +440,45 @@ def search_product_on_web(upc=None, name=None):
     upc_clean = re.sub(r'[^0-9]', '', str(upc)) if upc else ''
     has_upc = bool(upc_clean) and upc_clean not in ('0', '')
 
-    # Build list of search queries to try (in priority order)
-    # UPC searches are most reliable — product is unique by UPC
+    # Build search queries — broader queries first (no site: restriction),
+    # then site-specific ones
     queries = []
     if has_upc:
-        queries.append(f'{upc_clean} site:amazon.com')
-        queries.append(f'{upc_clean} site:walmart.com')
-        queries.append(f'{upc_clean} site:target.com')
-        queries.append(f'{upc_clean} site:homedepot.com')
-        queries.append(f'{upc_clean} site:costco.com')
-        queries.append(f'{upc_clean} site:bestbuy.com')
+        # First try a broad search with just the UPC — search engines know where to find it
+        queries.append(f'{upc_clean} buy')
+        queries.append(f'{upc_clean} amazon OR walmart OR target')
     if name:
-        # Name-based searches are less reliable — only use for well-known retailers
         clean_name = str(name).strip()
         if clean_name:
-            queries.append(f'"{clean_name}" site:amazon.com')
-            queries.append(f'"{clean_name}" site:walmart.com')
-            queries.append(f'"{clean_name}" site:target.com')
+            queries.append(f'"{clean_name}" buy')
+            queries.append(f'{clean_name} amazon')
+
+    # Try each query across all search engines
+    search_engines = [_search_google, _search_bing, _search_duckduckgo]
 
     for query in queries:
-        url, title, source = _search_duckduckgo(query)
-        if url:
-            # If we got a URL but the title looks incomplete, try fetching the actual page
-            if not title or len(title) < 5:
-                page_title = _fetch_product_title_from_page(url)
-                if page_title:
-                    title = page_title
+        for search_fn in search_engines:
+            try:
+                url, title, source = search_fn(query)
+                if url:
+                    # If we got a URL but the title looks incomplete, try fetching the page
+                    if not title or len(title) < 5:
+                        page_title = _fetch_product_title_from_page(url)
+                        if page_title:
+                            title = page_title
 
-            # VALIDATION: Always verify relevance if we have an original name
-            # Even UPC searches on DuckDuckGo can return unrelated products
-            if name and title:
-                sim = _name_similarity(name, title)
-                if sim < 0.2:
-                    print(f'Web search result rejected (similarity {sim:.2f}): "{title}" vs original "{name}"')
-                    continue  # Skip this result, try next query
+                    # VALIDATION: verify relevance if we have an original name
+                    if name and title:
+                        sim = _name_similarity(name, title)
+                        if sim < 0.2:
+                            print(f'Web search result rejected ({search_fn.__name__}, sim={sim:.2f}): "{title}" vs "{name}"')
+                            continue  # Try next search engine
 
-            result = {'url': url, 'title': title, 'source': source}
-            break
+                    result = {'url': url, 'title': title, 'source': source}
+                    return result
+            except Exception as e:
+                print(f'Search engine {search_fn.__name__} failed for "{query}": {e}')
+                continue
 
     return result
 
@@ -400,15 +492,24 @@ def lookup_product_info(upc=None, name=None):
     upc_clean = re.sub(r'[^0-9]', '', str(upc)) if upc else ''
     has_upc = bool(upc_clean) and upc_clean.lower() not in ('na', 'nan', 'none', '0')
 
+    # Check cache first
+    cache_key = f'{upc_clean}|{name or ""}'
+    if cache_key in _lookup_cache:
+        print(f'Cache hit for: {cache_key}')
+        return _lookup_cache[cache_key].copy()
+
     # ── 1. UPCitemdb (best source — returns title, images, and offers in one call) ──
-    if has_upc:
+    if has_upc and not _api_rate_limited.get('upcitemdb'):
         try:
             resp = requests.get(
                 f'https://api.upcitemdb.com/prod/trial/lookup?upc={upc_clean}',
                 timeout=8,
                 headers={'Accept': 'application/json'}
             )
-            if resp.status_code == 200:
+            if resp.status_code == 429:
+                print('UPCitemdb rate limited — skipping for remaining items')
+                _api_rate_limited['upcitemdb'] = True
+            elif resp.status_code == 200:
                 data = resp.json()
                 items = data.get('items', [])
                 if items:
@@ -461,6 +562,7 @@ def lookup_product_info(upc=None, name=None):
 
                     # If we got everything, return early
                     if result['title'] and result['image'] and result['retail_link']:
+                        _lookup_cache[cache_key] = result.copy()
                         return result
         except Exception as e:
             print(f'UPCitemdb lookup error: {e}')
@@ -582,6 +684,9 @@ def lookup_product_info(upc=None, name=None):
     # We intentionally do NOT generate amazon.com/s?k= search URLs as fallback.
     # It's better to leave the link blank than to give a search page that may
     # show unrelated products. The enrichment UI will show a dash for missing links.
+
+    # Cache the result (even if empty, to avoid re-hitting rate-limited APIs)
+    _lookup_cache[cache_key] = result.copy()
 
     return result
 
@@ -834,19 +939,36 @@ def debug_lookup():
 
     # Test 3: DuckDuckGo
     try:
-        q = f'{upc_clean} site:amazon.com'
+        q = f'{upc_clean} buy'
         resp = requests.get(
             f'https://html.duckduckgo.com/html/?q={urllib.parse.quote_plus(q)}',
             headers=BROWSER_HEADERS, timeout=10
         )
         results['tests']['duckduckgo'] = {
+            'query': q,
             'status_code': resp.status_code,
             'body_length': len(resp.text),
-            'body_preview': resp.text[:500],
-            'has_results': 'result__a' in resp.text
+            'has_results': 'result__a' in resp.text,
+            'result': _search_duckduckgo(q)
         }
     except Exception as e:
         results['tests']['duckduckgo'] = {'error': str(e)}
+
+    # Test 3b: Google
+    try:
+        q = f'{upc_clean} buy'
+        result_g = _search_google(q)
+        results['tests']['google'] = {'query': q, 'result': result_g}
+    except Exception as e:
+        results['tests']['google'] = {'error': str(e)}
+
+    # Test 3c: Bing
+    try:
+        q = f'{upc_clean} buy'
+        result_b = _search_bing(q)
+        results['tests']['bing'] = {'query': q, 'result': result_b}
+    except Exception as e:
+        results['tests']['bing'] = {'error': str(e)}
 
     # Test 4: Full lookup_product_info
     try:
