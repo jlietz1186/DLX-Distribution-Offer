@@ -314,21 +314,31 @@ def _fetch_product_title_from_page(url):
 
 
 def _name_similarity(name1, name2):
-    """Simple word-overlap similarity between two product names. Returns 0.0 to 1.0."""
+    """Smart word-overlap similarity between two product names. Returns 0.0 to 1.0.
+    Handles cases where original is short ('Tide Pods') and lookup is long
+    ('Tide PODS Laundry Detergent Soap Pacs, 81 Count, Spring Meadow').
+    The key question: do most words from the SHORT name appear in the LONG name?"""
     if not name1 or not name2:
         return 0.0
     # Normalize: lowercase, remove punctuation, split into words
     words1 = set(re.sub(r'[^a-z0-9\s]', '', name1.lower()).split())
     words2 = set(re.sub(r'[^a-z0-9\s]', '', name2.lower()).split())
     # Remove very common filler words
-    stop = {'the', 'a', 'an', 'and', 'or', 'of', 'for', 'in', 'with', 'to', 'by', 'is', 'at', 'on', 'from', 'pack', 'ct', 'oz', 'lb', 'count'}
+    stop = {'the', 'a', 'an', 'and', 'or', 'of', 'for', 'in', 'with', 'to', 'by',
+            'is', 'at', 'on', 'from', 'pack', 'ct', 'oz', 'lb', 'count', 'ea',
+            'each', 'per', 'size', 'new', 'free', 'buy', 'best', 'top', 'item'}
     words1 = words1 - stop
     words2 = words2 - stop
     if not words1 or not words2:
         return 0.0
     overlap = words1 & words2
-    # Jaccard-like but weighted toward the smaller set
-    return len(overlap) / min(len(words1), len(words2))
+
+    # Use the SHORTER name as the reference — "do most words from the original
+    # name appear somewhere in the lookup result?"
+    shorter = words1 if len(words1) <= len(words2) else words2
+    if not shorter:
+        return 0.0
+    return len(overlap) / len(shorter)
 
 
 def search_product_on_web(upc=None, name=None):
@@ -367,11 +377,12 @@ def search_product_on_web(upc=None, name=None):
                 if page_title:
                     title = page_title
 
-            # VALIDATION: If we searched by name (not UPC), verify the result is relevant
-            if name and not has_upc and title:
+            # VALIDATION: Always verify relevance if we have an original name
+            # Even UPC searches on DuckDuckGo can return unrelated products
+            if name and title:
                 sim = _name_similarity(name, title)
-                if sim < 0.25:
-                    print(f'Web search result rejected (low similarity {sim:.2f}): "{title}" vs "{name}"')
+                if sim < 0.2:
+                    print(f'Web search result rejected (similarity {sim:.2f}): "{title}" vs original "{name}"')
                     continue  # Skip this result, try next query
 
             result = {'url': url, 'title': title, 'source': source}
@@ -797,7 +808,7 @@ def enrich_data():
             continue
         item = items[i].copy()
         upc = item.get('UPC/Item #', '')
-        original_name = item.get('Item Name', '')
+        original_name = item.get('Item Name', '').strip()
 
         # Check what's missing
         img_val = item.get('Image', '')
@@ -808,39 +819,41 @@ def enrich_data():
         # Look up product info
         info = lookup_product_info(upc=upc, name=original_name)
 
-        # ── Item Name enrichment (with validation) ──
-        if info['title']:
-            # If we have a UPC, the API lookup is reliable — use the title
-            upc_clean = re.sub(r'[^0-9]', '', str(upc)) if upc else ''
-            has_upc = bool(upc_clean) and upc_clean.lower() not in ('na', 'nan', 'none', '0', '')
+        # ── VALIDATE: Does the lookup result match our product? ──
+        # This is the key check — even UPC lookups can return wrong products
+        lookup_is_relevant = False
 
-            if has_upc:
-                # UPC-based lookup is trustworthy — use the title
-                item['Item Name'] = info['title']
-                if info['source']:
-                    item['_name_source'] = info['source']
-            elif original_name:
-                # Name-based lookup — only use if the result is similar enough
-                sim = _name_similarity(original_name, info['title'])
-                if sim >= 0.25:
-                    item['Item Name'] = info['title']
-                    if info['source']:
-                        item['_name_source'] = info['source']
-                else:
-                    print(f'Enrichment: kept original name "{original_name}" (lookup "{info["title"]}" similarity {sim:.2f})')
+        if info['title'] and original_name:
+            sim = _name_similarity(original_name, info['title'])
+            if sim >= 0.2:
+                lookup_is_relevant = True
+                print(f'Enrichment MATCH (sim={sim:.2f}): "{original_name}" → "{info["title"]}"')
             else:
-                # No original name at all — use whatever we found
-                item['Item Name'] = info['title']
-                if info['source']:
-                    item['_name_source'] = info['source']
+                print(f'Enrichment REJECTED (sim={sim:.2f}): "{original_name}" ≠ "{info["title"]}" — keeping original')
+        elif info['title'] and not original_name:
+            # No original name — accept the lookup (we have nothing to compare against)
+            lookup_is_relevant = True
+        elif not info['title']:
+            # Lookup returned nothing — nothing to validate
+            lookup_is_relevant = False
+
+        # ── Item Name enrichment ──
+        # ONLY overwrite if the lookup result is relevant to the original product
+        if lookup_is_relevant and info['title']:
+            item['Item Name'] = info['title']
+            if info['source']:
+                item['_name_source'] = info['source']
 
         # ── Image enrichment ──
+        # Images are less risky — a wrong image is obvious and less harmful
+        # But if the lookup was clearly wrong, skip images too
         if needs_image and info['image']:
-            item['Image'] = info['image']
+            if lookup_is_relevant or not original_name:
+                item['Image'] = info['image']
 
         # ── Retail link enrichment ──
-        # ONLY set if it's an actual product page URL (not a search page)
-        if needs_link and info['retail_link']:
+        # ONLY set if: (a) the lookup matched our product, AND (b) it's an actual product page
+        if needs_link and info['retail_link'] and lookup_is_relevant:
             retail_url = info['retail_link']
             # Reject search page URLs — only accept actual product pages
             is_search_page = (
