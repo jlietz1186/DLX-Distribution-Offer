@@ -170,17 +170,6 @@ _lookup_cache = {}
 _api_rate_limited = {}
 
 
-def _parse_ddg_url(href):
-    """Extract actual URL from DuckDuckGo redirect link."""
-    if 'uddg=' in href:
-        match = re.search(r'uddg=([^&]+)', href)
-        if match:
-            return urllib.parse.unquote(match.group(1))
-    if href.startswith('http'):
-        return href
-    return None
-
-
 def _is_product_page_url(url):
     """Check if a URL is an actual product page (not a search/listing page).
     Returns (clean_url, source) or (None, None)."""
@@ -241,120 +230,64 @@ def _is_product_page_url(url):
     return None, None
 
 
-def _search_duckduckgo(query):
-    """Search DuckDuckGo HTML and return first actual product page result.
-    ONLY returns URLs that are verified product pages (not search results pages).
+# SearXNG public instances — open-source meta search engines that provide
+# JSON APIs and are designed for programmatic use (unlike Google/Bing/DDG
+# which block datacenter IPs like Render's).
+SEARXNG_INSTANCES = [
+    'https://search.bus-hit.me',
+    'https://searx.be',
+    'https://search.sapti.me',
+    'https://searx.tiekoetter.com',
+    'https://search.ononoki.org',
+    'https://searx.oxf.app',
+    'https://paulgo.io',
+]
+
+
+def _search_searxng(query):
+    """Search using SearXNG public instances (JSON API).
+    Tries multiple instances for reliability.
     Returns (url, title, source) or (None, None, None)."""
-    try:
-        q = urllib.parse.quote_plus(query)
-        resp = requests.get(
-            f'https://html.duckduckgo.com/html/?q={q}',
-            headers=BROWSER_HEADERS,
-            timeout=10
-        )
-        if resp.status_code == 200:
-            soup = BeautifulSoup(resp.text, 'html.parser')
-            for result in soup.find_all('a', class_='result__a'):
-                href = result.get('href', '')
-                title = result.get_text(strip=True)
-                actual_url = _parse_ddg_url(href)
-                if not actual_url:
-                    continue
+    import random
+    # Shuffle instances so we spread load
+    instances = SEARXNG_INSTANCES.copy()
+    random.shuffle(instances)
 
-                # ONLY accept actual product page URLs (not search/listing pages)
-                clean_url, source = _is_product_page_url(actual_url)
-                if clean_url and source:
-                    # Clean up the title (remove site prefixes)
-                    title = re.sub(r'^(Amazon\.com|Walmart\.com|Target|Home Depot|Costco)\s*[:\-–]\s*', '', title).strip()
-                    # Remove trailing site names
-                    title = re.sub(r'\s*[:\-–|]\s*(Amazon\.com|Walmart|Target|Home Depot|Costco|Best Buy|eBay)\s*$', '', title).strip()
-                    return clean_url, title, source
-        else:
-            print(f'DuckDuckGo returned status {resp.status_code}')
-    except Exception as e:
-        print(f'DuckDuckGo search error: {e}')
-
-    return None, None, None
-
-
-def _search_google(query):
-    """Search Google and return first actual product page result.
-    Returns (url, title, source) or (None, None, None)."""
-    try:
-        q = urllib.parse.quote_plus(query)
-        resp = requests.get(
-            f'https://www.google.com/search?q={q}&num=10',
-            headers={
-                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
-                'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
-                'Accept-Language': 'en-US,en;q=0.9',
-            },
-            timeout=10
-        )
-        if resp.status_code == 200:
-            soup = BeautifulSoup(resp.text, 'html.parser')
-            # Google results are in <a> tags with href containing /url?q=ACTUAL_URL
-            for a_tag in soup.find_all('a', href=True):
-                href = a_tag['href']
-                # Extract real URL from Google redirect
-                actual_url = None
-                if href.startswith('/url?q='):
-                    match = re.match(r'/url\?q=([^&]+)', href)
-                    if match:
-                        actual_url = urllib.parse.unquote(match.group(1))
-                elif href.startswith('http') and 'google.' not in href:
-                    actual_url = href
-
-                if not actual_url:
-                    continue
-
-                clean_url, source = _is_product_page_url(actual_url)
-                if clean_url and source:
-                    # Try to get title from the link text or parent
-                    title = a_tag.get_text(strip=True)
-                    title = re.sub(r'^(Amazon\.com|Walmart\.com|Target|Home Depot|Costco)\s*[:\-–]\s*', '', title).strip()
-                    title = re.sub(r'\s*[:\-–|]\s*(Amazon\.com|Walmart|Target|Home Depot|Costco|Best Buy|eBay)\s*$', '', title).strip()
-                    if title and len(title) > 3:
+    for instance in instances:
+        try:
+            resp = requests.get(
+                f'{instance}/search',
+                params={
+                    'q': query,
+                    'format': 'json',
+                    'categories': 'general',
+                    'language': 'en',
+                },
+                headers=BROWSER_HEADERS,
+                timeout=12
+            )
+            if resp.status_code == 200:
+                data = resp.json()
+                results = data.get('results', [])
+                for r in results:
+                    url = r.get('url', '')
+                    title = r.get('title', '')
+                    if not url:
+                        continue
+                    clean_url, source = _is_product_page_url(url)
+                    if clean_url and source:
+                        # Clean up title
+                        title = re.sub(r'^(Amazon\.com|Walmart\.com|Target|Home Depot|Costco)\s*[:\-–]\s*', '', title).strip()
+                        title = re.sub(r'\s*[:\-–|]\s*(Amazon\.com|Walmart|Target|Home Depot|Costco|Best Buy|eBay)\s*$', '', title).strip()
+                        print(f'SearXNG ({instance}) found: {clean_url} — "{title}"')
                         return clean_url, title, source
-                    else:
-                        return clean_url, None, source
-        else:
-            print(f'Google returned status {resp.status_code}')
-    except Exception as e:
-        print(f'Google search error: {e}')
-
-    return None, None, None
-
-
-def _search_bing(query):
-    """Search Bing and return first actual product page result.
-    Returns (url, title, source) or (None, None, None)."""
-    try:
-        q = urllib.parse.quote_plus(query)
-        resp = requests.get(
-            f'https://www.bing.com/search?q={q}',
-            headers=BROWSER_HEADERS,
-            timeout=10
-        )
-        if resp.status_code == 200:
-            soup = BeautifulSoup(resp.text, 'html.parser')
-            for a_tag in soup.find_all('a', href=True):
-                href = a_tag['href']
-                if not href.startswith('http') or 'bing.com' in href or 'microsoft.com' in href:
-                    continue
-                clean_url, source = _is_product_page_url(href)
-                if clean_url and source:
-                    title = a_tag.get_text(strip=True)
-                    title = re.sub(r'^(Amazon\.com|Walmart\.com|Target|Home Depot|Costco)\s*[:\-–]\s*', '', title).strip()
-                    title = re.sub(r'\s*[:\-–|]\s*(Amazon\.com|Walmart|Target|Home Depot|Costco|Best Buy|eBay)\s*$', '', title).strip()
-                    if title and len(title) > 3:
-                        return clean_url, title, source
-                    else:
-                        return clean_url, None, source
-        else:
-            print(f'Bing returned status {resp.status_code}')
-    except Exception as e:
-        print(f'Bing search error: {e}')
+                # Had results but none were product pages
+                print(f'SearXNG ({instance}) returned {len(results)} results but no product pages for: {query}')
+            else:
+                print(f'SearXNG ({instance}) returned status {resp.status_code}')
+        except Exception as e:
+            print(f'SearXNG ({instance}) error: {e}')
+            continue
 
     return None, None, None
 
@@ -431,8 +364,7 @@ def _name_similarity(name1, name2):
 
 
 def search_product_on_web(upc=None, name=None):
-    """Search multiple search engines for a product on major retail sites.
-    Tries DuckDuckGo, Google, and Bing in sequence.
+    """Search for a product on major retail sites using SearXNG.
     ONLY returns results that are actual product pages.
     Returns dict with keys: url, title, source."""
     result = {'url': None, 'title': None, 'source': None}
@@ -440,45 +372,39 @@ def search_product_on_web(upc=None, name=None):
     upc_clean = re.sub(r'[^0-9]', '', str(upc)) if upc else ''
     has_upc = bool(upc_clean) and upc_clean not in ('0', '')
 
-    # Build search queries — broader queries first (no site: restriction),
-    # then site-specific ones
+    # Build search queries — try UPC first, then name-based
     queries = []
     if has_upc:
-        # First try a broad search with just the UPC — search engines know where to find it
         queries.append(f'{upc_clean} buy')
-        queries.append(f'{upc_clean} amazon OR walmart OR target')
+        queries.append(f'{upc_clean} amazon walmart target')
     if name:
         clean_name = str(name).strip()
         if clean_name:
-            queries.append(f'"{clean_name}" buy')
-            queries.append(f'{clean_name} amazon')
-
-    # Try each query across all search engines
-    search_engines = [_search_google, _search_bing, _search_duckduckgo]
+            queries.append(f'{clean_name} buy amazon')
+            queries.append(f'{clean_name} walmart OR target OR "home depot"')
 
     for query in queries:
-        for search_fn in search_engines:
-            try:
-                url, title, source = search_fn(query)
-                if url:
-                    # If we got a URL but the title looks incomplete, try fetching the page
-                    if not title or len(title) < 5:
-                        page_title = _fetch_product_title_from_page(url)
-                        if page_title:
-                            title = page_title
+        try:
+            url, title, source = _search_searxng(query)
+            if url:
+                # If we got a URL but the title looks incomplete, try fetching the page
+                if not title or len(title) < 5:
+                    page_title = _fetch_product_title_from_page(url)
+                    if page_title:
+                        title = page_title
 
-                    # VALIDATION: verify relevance if we have an original name
-                    if name and title:
-                        sim = _name_similarity(name, title)
-                        if sim < 0.2:
-                            print(f'Web search result rejected ({search_fn.__name__}, sim={sim:.2f}): "{title}" vs "{name}"')
-                            continue  # Try next search engine
+                # VALIDATION: verify relevance if we have an original name
+                if name and title:
+                    sim = _name_similarity(name, title)
+                    if sim < 0.2:
+                        print(f'SearXNG result rejected (sim={sim:.2f}): "{title}" vs "{name}"')
+                        continue  # Try next query
 
-                    result = {'url': url, 'title': title, 'source': source}
-                    return result
-            except Exception as e:
-                print(f'Search engine {search_fn.__name__} failed for "{query}": {e}')
-                continue
+                result = {'url': url, 'title': title, 'source': source}
+                return result
+        except Exception as e:
+            print(f'SearXNG search failed for "{query}": {e}')
+            continue
 
     return result
 
@@ -937,38 +863,31 @@ def debug_lookup():
     except Exception as e:
         results['tests']['openfoodfacts'] = {'error': str(e)}
 
-    # Test 3: DuckDuckGo
+    # Test 3: SearXNG (replaces DuckDuckGo/Google/Bing which block datacenter IPs)
     try:
         q = f'{upc_clean} buy'
-        resp = requests.get(
-            f'https://html.duckduckgo.com/html/?q={urllib.parse.quote_plus(q)}',
-            headers=BROWSER_HEADERS, timeout=10
-        )
-        results['tests']['duckduckgo'] = {
+        url, title, source = _search_searxng(q)
+        results['tests']['searxng'] = {
             'query': q,
-            'status_code': resp.status_code,
-            'body_length': len(resp.text),
-            'has_results': 'result__a' in resp.text,
-            'result': _search_duckduckgo(q)
+            'found_url': url,
+            'found_title': title,
+            'found_source': source,
         }
     except Exception as e:
-        results['tests']['duckduckgo'] = {'error': str(e)}
+        results['tests']['searxng'] = {'error': str(e), 'traceback': traceback.format_exc()}
 
-    # Test 3b: Google
+    # Test 3b: SearXNG with name query
     try:
-        q = f'{upc_clean} buy'
-        result_g = _search_google(q)
-        results['tests']['google'] = {'query': q, 'result': result_g}
+        q = f'{name} buy amazon'
+        url2, title2, source2 = _search_searxng(q)
+        results['tests']['searxng_name'] = {
+            'query': q,
+            'found_url': url2,
+            'found_title': title2,
+            'found_source': source2,
+        }
     except Exception as e:
-        results['tests']['google'] = {'error': str(e)}
-
-    # Test 3c: Bing
-    try:
-        q = f'{upc_clean} buy'
-        result_b = _search_bing(q)
-        results['tests']['bing'] = {'query': q, 'result': result_b}
-    except Exception as e:
-        results['tests']['bing'] = {'error': str(e)}
+        results['tests']['searxng_name'] = {'error': str(e)}
 
     # Test 4: Full lookup_product_info
     try:
