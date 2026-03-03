@@ -327,7 +327,18 @@
                     } else if (col === 'Retail Link') {
                         if (val && val.startsWith('http')) {
                             let display = 'View Product';
-                            try { display = new URL(val).hostname.replace('www.',''); } catch(e) {}
+                            try {
+                                const host = new URL(val).hostname.replace('www.','').toLowerCase();
+                                if (host.includes('amazon')) display = 'Amazon';
+                                else if (host.includes('walmart')) display = 'Walmart';
+                                else if (host.includes('target.com')) display = 'Target';
+                                else if (host.includes('homedepot')) display = 'Home Depot';
+                                else if (host.includes('costco')) display = 'Costco';
+                                else if (host.includes('bestbuy')) display = 'Best Buy';
+                                else if (host.includes('ebay')) display = 'eBay';
+                                else if (host.includes('kroger')) display = 'Kroger';
+                                else display = host;
+                            } catch(e) {}
                             td.innerHTML = `<a href="${escHtml(val)}" target="_blank"><i class="fas fa-external-link-alt"></i> ${escHtml(display)}</a>`;
                         } else {
                             td.innerHTML = '<span class="na-badge">&mdash;</span>';
