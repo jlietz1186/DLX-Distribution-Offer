@@ -176,8 +176,69 @@ def _parse_ddg_url(href):
     return None
 
 
+def _is_product_page_url(url):
+    """Check if a URL is an actual product page (not a search/listing page).
+    Returns (clean_url, source) or (None, None)."""
+    if not url:
+        return None, None
+
+    # Amazon: must have /dp/ASIN — reject /s? (search), /b/ (browse), /gp/ (generic)
+    amazon_match = re.search(r'amazon\.com.*/dp/([A-Z0-9]{10})', url)
+    if amazon_match:
+        asin = amazon_match.group(1)
+        return f'https://www.amazon.com/dp/{asin}', 'Amazon'
+
+    # Walmart: must have /ip/ (item page)
+    walmart_match = re.search(r'(https?://[^/]*walmart\.com/ip/[^\s?#]+)', url)
+    if walmart_match:
+        return walmart_match.group(1), 'Walmart'
+
+    # Target: must have /-/A- (product ID)
+    target_match = re.search(r'(https?://[^/]*target\.com/[^\s?#]*/-/A-\d+)', url)
+    if target_match:
+        return target_match.group(1), 'Target'
+
+    # Home Depot: must have /p/ (product page)
+    hd_match = re.search(r'(https?://[^/]*homedepot\.com/p/[^\s?#]+)', url)
+    if hd_match:
+        return hd_match.group(1), 'Home Depot'
+
+    # Costco: must have /product (product page)
+    costco_match = re.search(r'(https?://[^/]*costco\.com[^\s?#]*/product[^\s?#]*)', url)
+    if costco_match:
+        return costco_match.group(1), 'Costco'
+
+    # Best Buy: must have /site/ with .p?skuId
+    bb_match = re.search(r'(https?://[^/]*bestbuy\.com/site/[^\s?#]+\.p)', url)
+    if bb_match:
+        return bb_match.group(1), 'Best Buy'
+
+    # Kroger: product page
+    kroger_match = re.search(r'(https?://[^/]*kroger\.com/p/[^\s?#]+)', url)
+    if kroger_match:
+        return kroger_match.group(1), 'Kroger'
+
+    # Walgreens: product page
+    wg_match = re.search(r'(https?://[^/]*walgreens\.com/store/id=[^\s?#]+)', url)
+    if wg_match:
+        return wg_match.group(1), 'Walgreens'
+
+    # CVS: product page
+    cvs_match = re.search(r'(https?://[^/]*cvs\.com/shop/[^\s?#]+)', url)
+    if cvs_match:
+        return cvs_match.group(1), 'CVS'
+
+    # eBay: must have /itm/ (item page)
+    ebay_match = re.search(r'(https?://[^/]*ebay\.com/itm/[^\s?#]+)', url)
+    if ebay_match:
+        return ebay_match.group(1), 'eBay'
+
+    return None, None
+
+
 def _search_duckduckgo(query):
-    """Search DuckDuckGo HTML and return first retail product result.
+    """Search DuckDuckGo HTML and return first actual product page result.
+    ONLY returns URLs that are verified product pages (not search results pages).
     Returns (url, title, source) or (None, None, None)."""
     try:
         q = urllib.parse.quote_plus(query)
@@ -195,29 +256,14 @@ def _search_duckduckgo(query):
                 if not actual_url:
                     continue
 
-                # Check if it's an Amazon product page (has /dp/ASIN)
-                amazon_match = re.search(r'amazon\.com.*/dp/([A-Z0-9]{10})', actual_url)
-                if amazon_match:
-                    asin = amazon_match.group(1)
-                    clean_url = f'https://www.amazon.com/dp/{asin}'
-                    # Clean up title (remove "Amazon.com: " prefix if present)
-                    title = re.sub(r'^Amazon\.com\s*[:\-]\s*', '', title).strip()
-                    return clean_url, title, 'Amazon'
-
-                # Check Walmart product page (has /ip/)
-                walmart_match = re.search(r'walmart\.com.*/ip/[^?]+', actual_url)
-                if walmart_match:
-                    clean_url = walmart_match.group(0)
-                    if not clean_url.startswith('http'):
-                        clean_url = 'https://www.' + clean_url
-                    title = re.sub(r'^Walmart\.com\s*[:\-]\s*', '', title).strip()
-                    return clean_url, title, 'Walmart'
-
-                # Check Target product page (has /-/A-)
-                target_match = re.search(r'target\.com.*/-/A-\d+', actual_url)
-                if target_match:
-                    title = re.sub(r'^Target\s*[:\-]\s*', '', title).strip()
-                    return actual_url.split('?')[0], title, 'Target'
+                # ONLY accept actual product page URLs (not search/listing pages)
+                clean_url, source = _is_product_page_url(actual_url)
+                if clean_url and source:
+                    # Clean up the title (remove site prefixes)
+                    title = re.sub(r'^(Amazon\.com|Walmart\.com|Target|Home Depot|Costco)\s*[:\-–]\s*', '', title).strip()
+                    # Remove trailing site names
+                    title = re.sub(r'\s*[:\-–|]\s*(Amazon\.com|Walmart|Target|Home Depot|Costco|Best Buy|eBay)\s*$', '', title).strip()
+                    return clean_url, title, source
     except Exception as e:
         print(f'DuckDuckGo search error: {e}')
 
@@ -248,19 +294,46 @@ def _fetch_product_title_from_page(url):
                 el = soup.find('h1') or soup.find('title')
                 if el:
                     t = el.get_text(strip=True)
-                    return re.sub(r'\s*[:\-|]\s*Target$', '', t)
+                    return re.sub(r'\s*[:\-–|]\s*Target$', '', t)
 
-            # Generic: use <title> tag
+            # Home Depot product title
+            if 'homedepot.com' in url:
+                el = soup.find('h1', class_='product-details__title') or soup.find('h1')
+                if el:
+                    return el.get_text(strip=True)
+
+            # Generic: use <title> tag, clean up common suffixes
             title_tag = soup.find('title')
             if title_tag:
-                return title_tag.get_text(strip=True)
+                t = title_tag.get_text(strip=True)
+                t = re.sub(r'\s*[:\-–|]\s*(Amazon\.com|Walmart|Target|Home Depot|Costco|Best Buy|eBay).*$', '', t)
+                return t.strip()
     except Exception as e:
         print(f'Page fetch error for {url}: {e}')
     return None
 
 
+def _name_similarity(name1, name2):
+    """Simple word-overlap similarity between two product names. Returns 0.0 to 1.0."""
+    if not name1 or not name2:
+        return 0.0
+    # Normalize: lowercase, remove punctuation, split into words
+    words1 = set(re.sub(r'[^a-z0-9\s]', '', name1.lower()).split())
+    words2 = set(re.sub(r'[^a-z0-9\s]', '', name2.lower()).split())
+    # Remove very common filler words
+    stop = {'the', 'a', 'an', 'and', 'or', 'of', 'for', 'in', 'with', 'to', 'by', 'is', 'at', 'on', 'from', 'pack', 'ct', 'oz', 'lb', 'count'}
+    words1 = words1 - stop
+    words2 = words2 - stop
+    if not words1 or not words2:
+        return 0.0
+    overlap = words1 & words2
+    # Jaccard-like but weighted toward the smaller set
+    return len(overlap) / min(len(words1), len(words2))
+
+
 def search_product_on_web(upc=None, name=None):
     """Search DuckDuckGo for a product on major retail sites.
+    ONLY returns results that are actual product pages.
     Returns dict with keys: url, title, source."""
     result = {'url': None, 'title': None, 'source': None}
 
@@ -268,24 +341,39 @@ def search_product_on_web(upc=None, name=None):
     has_upc = bool(upc_clean) and upc_clean not in ('0', '')
 
     # Build list of search queries to try (in priority order)
+    # UPC searches are most reliable — product is unique by UPC
     queries = []
     if has_upc:
         queries.append(f'{upc_clean} site:amazon.com')
         queries.append(f'{upc_clean} site:walmart.com')
         queries.append(f'{upc_clean} site:target.com')
+        queries.append(f'{upc_clean} site:homedepot.com')
+        queries.append(f'{upc_clean} site:costco.com')
+        queries.append(f'{upc_clean} site:bestbuy.com')
     if name:
+        # Name-based searches are less reliable — only use for well-known retailers
         clean_name = str(name).strip()
-        queries.append(f'{clean_name} site:amazon.com')
-        queries.append(f'{clean_name} site:walmart.com')
+        if clean_name:
+            queries.append(f'"{clean_name}" site:amazon.com')
+            queries.append(f'"{clean_name}" site:walmart.com')
+            queries.append(f'"{clean_name}" site:target.com')
 
     for query in queries:
         url, title, source = _search_duckduckgo(query)
         if url:
-            # If we got a URL but the title looks like a search snippet, fetch the actual page
-            if not title or len(title) < 5 or title.lower().startswith('amazon') or title.lower().startswith('walmart'):
+            # If we got a URL but the title looks incomplete, try fetching the actual page
+            if not title or len(title) < 5:
                 page_title = _fetch_product_title_from_page(url)
                 if page_title:
                     title = page_title
+
+            # VALIDATION: If we searched by name (not UPC), verify the result is relevant
+            if name and not has_upc and title:
+                sim = _name_similarity(name, title)
+                if sim < 0.25:
+                    print(f'Web search result rejected (low similarity {sim:.2f}): "{title}" vs "{name}"')
+                    continue  # Skip this result, try next query
+
             result = {'url': url, 'title': title, 'source': source}
             break
 
@@ -324,6 +412,7 @@ def lookup_product_info(upc=None, name=None):
                         result['image'] = images[0]
 
                     # Get retail link — prioritize Amazon, then other 1st-tier retailers
+                    # ONLY accept actual product page URLs, not search pages
                     offers = item.get('offers', [])
                     best_link = None
                     best_priority = len(RETAIL_PRIORITY) + 1  # worst priority
@@ -334,6 +423,15 @@ def lookup_product_info(upc=None, name=None):
                         merchant = offer.get('merchant', '').lower()
                         if not link:
                             continue
+
+                        # Validate: is this an actual product page?
+                        product_url, product_source = _is_product_page_url(link)
+                        if product_url:
+                            link = product_url
+                        else:
+                            # Skip search/listing page URLs
+                            if '/s?' in link or '/search' in link or 'query=' in link:
+                                continue
 
                         # Check against priority list
                         for idx, retailer in enumerate(RETAIL_PRIORITY):
@@ -468,13 +566,10 @@ def lookup_product_info(upc=None, name=None):
         if web_result['source'] and not result['source']:
             result['source'] = web_result['source']
 
-    # ── 7. Last resort: Amazon search URL (only if everything else failed) ──
-    if not result['retail_link']:
-        if has_upc:
-            result['retail_link'] = f'https://www.amazon.com/s?k={upc_clean}'
-        elif name:
-            q = urllib.parse.quote_plus(str(name))
-            result['retail_link'] = f'https://www.amazon.com/s?k={q}'
+    # ── 7. No fallback to search URLs ──
+    # We intentionally do NOT generate amazon.com/s?k= search URLs as fallback.
+    # It's better to leave the link blank than to give a search page that may
+    # show unrelated products. The enrichment UI will show a dash for missing links.
 
     return result
 
@@ -702,7 +797,7 @@ def enrich_data():
             continue
         item = items[i].copy()
         upc = item.get('UPC/Item #', '')
-        name = item.get('Item Name', '')
+        original_name = item.get('Item Name', '')
 
         # Check what's missing
         img_val = item.get('Image', '')
@@ -710,22 +805,58 @@ def enrich_data():
         link_val = item.get('Retail Link', '')
         needs_link = not link_val or not link_val.startswith('http')
 
-        # Always do a lookup to get the product title (for Item Name enrichment)
-        info = lookup_product_info(upc=upc, name=name)
+        # Look up product info
+        info = lookup_product_info(upc=upc, name=original_name)
 
-        # Set Item Name from the lookup title (Amazon/retail title takes priority)
+        # ── Item Name enrichment (with validation) ──
         if info['title']:
-            item['Item Name'] = info['title']
-            if info['source']:
-                item['_name_source'] = info['source']
+            # If we have a UPC, the API lookup is reliable — use the title
+            upc_clean = re.sub(r'[^0-9]', '', str(upc)) if upc else ''
+            has_upc = bool(upc_clean) and upc_clean.lower() not in ('na', 'nan', 'none', '0', '')
 
-        # Set image if missing
+            if has_upc:
+                # UPC-based lookup is trustworthy — use the title
+                item['Item Name'] = info['title']
+                if info['source']:
+                    item['_name_source'] = info['source']
+            elif original_name:
+                # Name-based lookup — only use if the result is similar enough
+                sim = _name_similarity(original_name, info['title'])
+                if sim >= 0.25:
+                    item['Item Name'] = info['title']
+                    if info['source']:
+                        item['_name_source'] = info['source']
+                else:
+                    print(f'Enrichment: kept original name "{original_name}" (lookup "{info["title"]}" similarity {sim:.2f})')
+            else:
+                # No original name at all — use whatever we found
+                item['Item Name'] = info['title']
+                if info['source']:
+                    item['_name_source'] = info['source']
+
+        # ── Image enrichment ──
         if needs_image and info['image']:
             item['Image'] = info['image']
 
-        # Set retail link if missing
+        # ── Retail link enrichment ──
+        # ONLY set if it's an actual product page URL (not a search page)
         if needs_link and info['retail_link']:
-            item['Retail Link'] = info['retail_link']
+            retail_url = info['retail_link']
+            # Reject search page URLs — only accept actual product pages
+            is_search_page = (
+                '/s?' in retail_url or
+                '/s/' in retail_url or
+                '/search?' in retail_url or
+                '/search/' in retail_url or
+                'query=' in retail_url or
+                'keywords=' in retail_url
+            )
+            product_url, _ = _is_product_page_url(retail_url)
+            if product_url:
+                item['Retail Link'] = product_url
+            elif not is_search_page:
+                item['Retail Link'] = retail_url
+            # If it's just a search page, don't set it — leave blank rather than mislead
 
         enriched.append({'index': i, 'item': item})
 
