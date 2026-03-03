@@ -153,112 +153,20 @@ def parse_pdf(filepath):
 
 
 # ── Product Lookup Services ──────────────────────────────────────────────────
-def lookup_upc_image(upc):
-    """Look up product image by UPC code using multiple free APIs."""
-    if not upc or str(upc).lower() in ('na', '', 'nan', 'none'):
-        return None
-    upc_clean = re.sub(r'[^0-9]', '', str(upc))
-    if not upc_clean:
-        return None
-
-    # Try UPCitemdb free API
-    try:
-        resp = requests.get(
-            f'https://api.upcitemdb.com/prod/trial/lookup?upc={upc_clean}',
-            timeout=8,
-            headers={'Accept': 'application/json'}
-        )
-        if resp.status_code == 200:
-            data = resp.json()
-            items = data.get('items', [])
-            if items:
-                images = items[0].get('images', [])
-                if images:
-                    return images[0]
-    except Exception:
-        pass
-
-    # Try Open Food Facts
-    try:
-        resp = requests.get(
-            f'https://world.openfoodfacts.org/api/v0/product/{upc_clean}.json',
-            timeout=8
-        )
-        if resp.status_code == 200:
-            data = resp.json()
-            product = data.get('product', {})
-            img = product.get('image_url') or product.get('image_front_url') or product.get('image_front_small_url')
-            if img:
-                return img
-    except Exception:
-        pass
-
-    # Try Go-UPC API (free tier)
-    try:
-        resp = requests.get(
-            f'https://go-upc.com/api/v1/code/{upc_clean}',
-            timeout=8,
-            headers={'Accept': 'application/json'}
-        )
-        if resp.status_code == 200:
-            data = resp.json()
-            img = data.get('product', {}).get('imageUrl')
-            if img:
-                return img
-    except Exception:
-        pass
-
-    # Try Barcode Lookup
-    try:
-        resp = requests.get(
-            f'https://www.barcodelookup.com/restapi?barcode={upc_clean}',
-            timeout=8,
-            headers={'Accept': 'application/json'}
-        )
-        if resp.status_code == 200:
-            data = resp.json()
-            products = data.get('products', [])
-            if products:
-                images = products[0].get('images', [])
-                if images:
-                    return images[0]
-    except Exception:
-        pass
-
-    return None
+# Priority order for retail sources (1st tier)
+RETAIL_PRIORITY = ['amazon', 'walmart', 'target', 'costco', 'kroger', 'walgreens', 'cvs', 'ebay', 'bestbuy', 'homedepot']
 
 
-def search_product_image(name):
-    """Search for a product image by name using free APIs."""
-    if not name:
-        return None
+def lookup_product_info(upc=None, name=None):
+    """Unified product lookup: returns dict with title, image, retail_link, source.
+    Makes ONE call per API instead of separate calls for image/link/name."""
+    result = {'title': None, 'image': None, 'retail_link': None, 'source': None}
 
-    # Try Open Food Facts search
-    try:
-        q = urllib.parse.quote_plus(str(name))
-        resp = requests.get(
-            f'https://world.openfoodfacts.org/cgi/search.pl?search_terms={q}&search_simple=1&action=process&json=1&page_size=1',
-            timeout=8
-        )
-        if resp.status_code == 200:
-            data = resp.json()
-            products = data.get('products', [])
-            if products:
-                img = products[0].get('image_url') or products[0].get('image_front_url') or products[0].get('image_front_small_url')
-                if img:
-                    return img
-    except Exception:
-        pass
-
-    return None
-
-
-def find_retail_link(upc=None, name=None):
-    links = {}
     upc_clean = re.sub(r'[^0-9]', '', str(upc)) if upc else ''
+    has_upc = bool(upc_clean) and upc_clean.lower() not in ('na', 'nan', 'none', '0')
 
-    if upc_clean:
-        # Try UPCitemdb for offers/links
+    # ── 1. UPCitemdb (best source — returns title, images, and offers in one call) ──
+    if has_upc:
         try:
             resp = requests.get(
                 f'https://api.upcitemdb.com/prod/trial/lookup?upc={upc_clean}',
@@ -269,30 +177,159 @@ def find_retail_link(upc=None, name=None):
                 data = resp.json()
                 items = data.get('items', [])
                 if items:
-                    offers = items[0].get('offers', [])
+                    item = items[0]
+                    # Get product title
+                    title = item.get('title', '').strip()
+                    if title:
+                        result['title'] = title
+
+                    # Get product image
+                    images = item.get('images', [])
+                    if images:
+                        result['image'] = images[0]
+
+                    # Get retail link — prioritize Amazon, then other 1st-tier retailers
+                    offers = item.get('offers', [])
+                    best_link = None
+                    best_priority = len(RETAIL_PRIORITY) + 1  # worst priority
+                    fallback_link = None
+
                     for offer in offers:
-                        link = offer.get('link')
+                        link = offer.get('link', '')
                         merchant = offer.get('merchant', '').lower()
-                        if link:
-                            if 'amazon' in merchant:
-                                return link
-                            elif 'walmart' in merchant:
-                                return link
-                            elif not links.get('other'):
-                                links['other'] = link
+                        if not link:
+                            continue
+
+                        # Check against priority list
+                        for idx, retailer in enumerate(RETAIL_PRIORITY):
+                            if retailer in merchant:
+                                if idx < best_priority:
+                                    best_priority = idx
+                                    best_link = link
+                                    result['source'] = retailer.capitalize()
+                                break
+                        else:
+                            # Not in priority list — keep as fallback
+                            if not fallback_link:
+                                fallback_link = link
+
+                    result['retail_link'] = best_link or fallback_link
+
+                    # If we got everything, return early
+                    if result['title'] and result['image'] and result['retail_link']:
+                        return result
+        except Exception as e:
+            print(f'UPCitemdb lookup error: {e}')
+
+    # ── 2. Open Food Facts (good for food/grocery — has title + image) ──
+    if has_upc and (not result['title'] or not result['image']):
+        try:
+            resp = requests.get(
+                f'https://world.openfoodfacts.org/api/v0/product/{upc_clean}.json',
+                timeout=8
+            )
+            if resp.status_code == 200:
+                data = resp.json()
+                product = data.get('product', {})
+                if product:
+                    if not result['title']:
+                        off_name = product.get('product_name', '').strip()
+                        if off_name:
+                            result['title'] = off_name
+                            if not result['source']:
+                                result['source'] = 'Open Food Facts'
+                    if not result['image']:
+                        img = (product.get('image_url') or
+                               product.get('image_front_url') or
+                               product.get('image_front_small_url'))
+                        if img:
+                            result['image'] = img
         except Exception:
             pass
 
-    if links.get('other'):
-        return links['other']
+    # ── 3. Go-UPC API ──
+    if has_upc and (not result['title'] or not result['image']):
+        try:
+            resp = requests.get(
+                f'https://go-upc.com/api/v1/code/{upc_clean}',
+                timeout=8,
+                headers={'Accept': 'application/json'}
+            )
+            if resp.status_code == 200:
+                data = resp.json()
+                prod = data.get('product', {})
+                if prod:
+                    if not result['title']:
+                        go_name = prod.get('name', '').strip()
+                        if go_name:
+                            result['title'] = go_name
+                            if not result['source']:
+                                result['source'] = 'Go-UPC'
+                    if not result['image']:
+                        img = prod.get('imageUrl')
+                        if img:
+                            result['image'] = img
+        except Exception:
+            pass
 
-    # Fallback: generate search URLs
-    if upc_clean:
-        return f'https://www.amazon.com/s?k={upc_clean}'
-    elif name:
-        q = urllib.parse.quote_plus(str(name))
-        return f'https://www.amazon.com/s?k={q}'
-    return ''
+    # ── 4. Barcode Lookup ──
+    if has_upc and (not result['title'] or not result['image']):
+        try:
+            resp = requests.get(
+                f'https://www.barcodelookup.com/restapi?barcode={upc_clean}',
+                timeout=8,
+                headers={'Accept': 'application/json'}
+            )
+            if resp.status_code == 200:
+                data = resp.json()
+                products = data.get('products', [])
+                if products:
+                    if not result['title']:
+                        bl_name = products[0].get('title', '').strip() or products[0].get('product_name', '').strip()
+                        if bl_name:
+                            result['title'] = bl_name
+                            if not result['source']:
+                                result['source'] = 'Barcode Lookup'
+                    if not result['image']:
+                        images = products[0].get('images', [])
+                        if images:
+                            result['image'] = images[0]
+        except Exception:
+            pass
+
+    # ── 5. Open Food Facts search by name (fallback when no UPC) ──
+    if not result['image'] and name:
+        try:
+            q = urllib.parse.quote_plus(str(name))
+            resp = requests.get(
+                f'https://world.openfoodfacts.org/cgi/search.pl?search_terms={q}&search_simple=1&action=process&json=1&page_size=1',
+                timeout=8
+            )
+            if resp.status_code == 200:
+                data = resp.json()
+                products = data.get('products', [])
+                if products:
+                    if not result['title']:
+                        off_name = products[0].get('product_name', '').strip()
+                        if off_name:
+                            result['title'] = off_name
+                    img = (products[0].get('image_url') or
+                           products[0].get('image_front_url') or
+                           products[0].get('image_front_small_url'))
+                    if img:
+                        result['image'] = img
+        except Exception:
+            pass
+
+    # ── 6. Fallback retail link: Amazon search URL ──
+    if not result['retail_link']:
+        if has_upc:
+            result['retail_link'] = f'https://www.amazon.com/s?k={upc_clean}'
+        elif name:
+            q = urllib.parse.quote_plus(str(name))
+            result['retail_link'] = f'https://www.amazon.com/s?k={q}'
+
+    return result
 
 
 # ── Image Download Helper ────────────────────────────────────────────────────
@@ -506,7 +543,7 @@ def process_data():
 
 @app.route('/enrich', methods=['POST'])
 def enrich_data():
-    """Look up images and retail links for items that need them."""
+    """Look up images, retail links, and product titles for items that need them."""
     data = request.json
     session_id = data.get('session_id')
     items = data.get('items', [])
@@ -520,21 +557,28 @@ def enrich_data():
         upc = item.get('UPC/Item #', '')
         name = item.get('Item Name', '')
 
-        # Look up image if missing or not a valid URL/path
+        # Check what's missing
         img_val = item.get('Image', '')
         needs_image = not img_val or (not img_val.startswith('http') and not img_val.startswith('/serve_image/'))
-        if needs_image:
-            img_url = lookup_upc_image(upc)
-            if not img_url:
-                img_url = search_product_image(name)
-            if img_url:
-                item['Image'] = img_url
-
-        # Look up retail link if missing
         link_val = item.get('Retail Link', '')
-        if not link_val or not link_val.startswith('http'):
-            link = find_retail_link(upc=upc, name=name)
-            item['Retail Link'] = link
+        needs_link = not link_val or not link_val.startswith('http')
+
+        # Always do a lookup to get the product title (for Item Name enrichment)
+        info = lookup_product_info(upc=upc, name=name)
+
+        # Set Item Name from the lookup title (Amazon/retail title takes priority)
+        if info['title']:
+            item['Item Name'] = info['title']
+            if info['source']:
+                item['_name_source'] = info['source']
+
+        # Set image if missing
+        if needs_image and info['image']:
+            item['Image'] = info['image']
+
+        # Set retail link if missing
+        if needs_link and info['retail_link']:
+            item['Retail Link'] = info['retail_link']
 
         enriched.append({'index': i, 'item': item})
 
