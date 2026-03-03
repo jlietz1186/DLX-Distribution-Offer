@@ -385,13 +385,14 @@ def search_product_on_web(upc=None, name=None):
 
     for query in queries:
         try:
-            url, title, source = _search_searxng(query)
+            url, snippet_title, source = _search_searxng(query)
             if url:
-                # If we got a URL but the title looks incomplete, try fetching the page
-                if not title or len(title) < 5:
-                    page_title = _fetch_product_title_from_page(url)
-                    if page_title:
-                        title = page_title
+                # ALWAYS fetch the real product title from the actual page.
+                # SearXNG snippet titles are often wrong or describe a different
+                # product than the URL points to.
+                page_title = _fetch_product_title_from_page(url)
+                title = page_title if page_title else snippet_title
+                print(f'Web search: snippet="{snippet_title}" → page="{page_title}" for {url}')
 
                 # VALIDATION: verify relevance if we have an original name
                 if name and title:
@@ -866,11 +867,13 @@ def debug_lookup():
     # Test 3: SearXNG (replaces DuckDuckGo/Google/Bing which block datacenter IPs)
     try:
         q = f'{upc_clean} buy'
-        url, title, source = _search_searxng(q)
+        url, snippet_title, source = _search_searxng(q)
+        page_title = _fetch_product_title_from_page(url) if url else None
         results['tests']['searxng'] = {
             'query': q,
             'found_url': url,
-            'found_title': title,
+            'snippet_title': snippet_title,
+            'page_title': page_title,
             'found_source': source,
         }
     except Exception as e:
@@ -879,11 +882,13 @@ def debug_lookup():
     # Test 3b: SearXNG with name query
     try:
         q = f'{name} buy amazon'
-        url2, title2, source2 = _search_searxng(q)
+        url2, snippet_title2, source2 = _search_searxng(q)
+        page_title2 = _fetch_product_title_from_page(url2) if url2 else None
         results['tests']['searxng_name'] = {
             'query': q,
             'found_url': url2,
-            'found_title': title2,
+            'snippet_title': snippet_title2,
+            'page_title': page_title2,
             'found_source': source2,
         }
     except Exception as e:
