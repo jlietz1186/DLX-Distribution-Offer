@@ -392,9 +392,10 @@ def search_product_on_web(upc=None, name=None):
 
 
 def lookup_product_info(upc=None, name=None):
-    """Unified product lookup: returns dict with title, image, retail_link, source.
-    Makes ONE call per API instead of separate calls for image/link/name."""
-    result = {'title': None, 'image': None, 'retail_link': None, 'source': None}
+    """Unified product lookup: returns dict with title, image, retail_link, source, upc_matched.
+    upc_matched=True means the result came from a direct UPC barcode lookup (trusted).
+    upc_matched=False means it came from a web search (needs validation)."""
+    result = {'title': None, 'image': None, 'retail_link': None, 'source': None, 'upc_matched': False}
 
     upc_clean = re.sub(r'[^0-9]', '', str(upc)) if upc else ''
     has_upc = bool(upc_clean) and upc_clean.lower() not in ('na', 'nan', 'none', '0')
@@ -412,6 +413,8 @@ def lookup_product_info(upc=None, name=None):
                 items = data.get('items', [])
                 if items:
                     item = items[0]
+                    # UPC API matched — this is a direct barcode lookup, trusted
+                    result['upc_matched'] = True
                     # Get product title
                     title = item.get('title', '').strip()
                     if title:
@@ -423,7 +426,8 @@ def lookup_product_info(upc=None, name=None):
                         result['image'] = images[0]
 
                     # Get retail link — prioritize Amazon, then other 1st-tier retailers
-                    # ONLY accept actual product page URLs, not search pages
+                    # UPCitemdb offers are from a direct UPC match, so they're trustworthy.
+                    # Just clean up URLs where possible and skip obvious search pages.
                     offers = item.get('offers', [])
                     best_link = None
                     best_priority = len(RETAIL_PRIORITY) + 1  # worst priority
@@ -435,14 +439,10 @@ def lookup_product_info(upc=None, name=None):
                         if not link:
                             continue
 
-                        # Validate: is this an actual product page?
-                        product_url, product_source = _is_product_page_url(link)
+                        # Try to clean up to a canonical product URL
+                        product_url, _ = _is_product_page_url(link)
                         if product_url:
                             link = product_url
-                        else:
-                            # Skip search/listing page URLs
-                            if '/s?' in link or '/search' in link or 'query=' in link:
-                                continue
 
                         # Check against priority list
                         for idx, retailer in enumerate(RETAIL_PRIORITY):
@@ -476,6 +476,7 @@ def lookup_product_info(upc=None, name=None):
                 data = resp.json()
                 product = data.get('product', {})
                 if product:
+                    result['upc_matched'] = True  # Direct UPC lookup
                     if not result['title']:
                         off_name = product.get('product_name', '').strip()
                         if off_name:
@@ -819,40 +820,41 @@ def enrich_data():
         # Look up product info
         info = lookup_product_info(upc=upc, name=original_name)
 
-        # ── VALIDATE: Does the lookup result match our product? ──
-        # This is the key check — even UPC lookups can return wrong products
-        lookup_is_relevant = False
-
-        if info['title'] and original_name:
+        # ── TRUST LEVEL ──
+        # UPC API lookups (UPCitemdb, Open Food Facts by barcode, etc.) are TRUSTED
+        # because they match on the exact barcode — the product IS correct.
+        # Web search results are UNTRUSTED and need name similarity validation.
+        if info['upc_matched']:
+            # Direct UPC barcode match — trust the result completely
+            lookup_is_relevant = True
+            if info['title']:
+                print(f'Enrichment UPC MATCH: "{original_name}" → "{info["title"]}" (source: {info["source"]})')
+        elif info['title'] and original_name:
+            # Web search result — validate against original name
             sim = _name_similarity(original_name, info['title'])
             if sim >= 0.2:
                 lookup_is_relevant = True
-                print(f'Enrichment MATCH (sim={sim:.2f}): "{original_name}" → "{info["title"]}"')
+                print(f'Enrichment NAME MATCH (sim={sim:.2f}): "{original_name}" → "{info["title"]}"')
             else:
+                lookup_is_relevant = False
                 print(f'Enrichment REJECTED (sim={sim:.2f}): "{original_name}" ≠ "{info["title"]}" — keeping original')
         elif info['title'] and not original_name:
-            # No original name — accept the lookup (we have nothing to compare against)
+            # No original name to compare — accept whatever we found
             lookup_is_relevant = True
-        elif not info['title']:
-            # Lookup returned nothing — nothing to validate
+        else:
             lookup_is_relevant = False
 
         # ── Item Name enrichment ──
-        # ONLY overwrite if the lookup result is relevant to the original product
         if lookup_is_relevant and info['title']:
             item['Item Name'] = info['title']
             if info['source']:
                 item['_name_source'] = info['source']
 
         # ── Image enrichment ──
-        # Images are less risky — a wrong image is obvious and less harmful
-        # But if the lookup was clearly wrong, skip images too
-        if needs_image and info['image']:
-            if lookup_is_relevant or not original_name:
-                item['Image'] = info['image']
+        if needs_image and info['image'] and lookup_is_relevant:
+            item['Image'] = info['image']
 
         # ── Retail link enrichment ──
-        # ONLY set if: (a) the lookup matched our product, AND (b) it's an actual product page
         if needs_link and info['retail_link'] and lookup_is_relevant:
             retail_url = info['retail_link']
             # Reject search page URLs — only accept actual product pages
@@ -869,7 +871,6 @@ def enrich_data():
                 item['Retail Link'] = product_url
             elif not is_search_page:
                 item['Retail Link'] = retail_url
-            # If it's just a search page, don't set it — leave blank rather than mislead
 
         enriched.append({'index': i, 'item': item})
 
