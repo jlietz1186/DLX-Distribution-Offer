@@ -90,6 +90,7 @@
         td a { color: var(--accent); text-decoration: none; font-weight: 500; }
         td a:hover { text-decoration: underline; }
         td .na-badge { background: var(--gray-200); color: var(--gray-500); padding: 0.2rem 0.6rem; border-radius: 4px; font-size: 0.8rem; }
+        td .source-badge { display: inline-block; background: #e0f2fe; color: #0369a1; padding: 0.1rem 0.4rem; border-radius: 3px; font-size: 0.65rem; margin-top: 0.25rem; font-weight: 600; }
 
         /* Loading / Progress */
         .loader { display: none; align-items: center; gap: 1rem; padding: 1.5rem; background: var(--accent-light); border-radius: var(--radius); margin: 1rem 0; }
@@ -184,11 +185,11 @@
         <!-- Step 3: Review & Enrich -->
         <div class="panel" id="step3">
             <h2><i class="fas fa-table-list"></i> Review Your Offer</h2>
-            <p class="desc">Review the formatted data below. Click "Enrich All" to auto-lookup missing images and retail links.</p>
+            <p class="desc">Review the formatted data below. Click "Enrich All" to auto-lookup product titles (from Amazon/retail), images, and retail links.</p>
             <div class="stats-bar" id="statsBar"></div>
             <div class="btn-group" style="margin-top:0;margin-bottom:1.5rem">
                 <button class="btn btn-outline" onclick="goToStep(2)"><i class="fas fa-arrow-left"></i> Back to Mapping</button>
-                <button class="btn btn-primary" onclick="enrichAll()" id="enrichBtn"><i class="fas fa-wand-magic-sparkles"></i> Enrich All (Lookup Images & Links)</button>
+                <button class="btn btn-primary" onclick="enrichAll()" id="enrichBtn"><i class="fas fa-wand-magic-sparkles"></i> Enrich All (Names, Images & Links)</button>
             </div>
             <div class="loader" id="enrichLoader">
                 <div class="spinner"></div>
@@ -315,6 +316,14 @@
                         } else {
                             td.innerHTML = '<div class="img-placeholder"><i class="fas fa-image" style="font-size:1.5rem;opacity:.4"></i></div>';
                         }
+                    } else if (col === 'Item Name') {
+                        td.textContent = val;
+                        if (item._name_source) {
+                            const badge = document.createElement('div');
+                            badge.className = 'source-badge';
+                            badge.textContent = 'via ' + item._name_source;
+                            td.appendChild(badge);
+                        }
                     } else if (col === 'Retail Link') {
                         if (val && val.startsWith('http')) {
                             let display = 'View Product';
@@ -360,14 +369,15 @@
             const text = document.getElementById('enrichText');
             loader.classList.add('visible');
 
-            // FIXED: Also enrich items where Image is non-empty but not a valid URL
-            // Skip items that already have local extracted images (/serve_image/)
+            // Enrich items that need images, links, OR product title updates
             const needEnrich = [];
             state.items.forEach((item, i) => {
                 const hasLocalImg = item.Image && item.Image.startsWith('/serve_image/');
                 const noImg = !hasLocalImg && !isValidImageUrl(item.Image);
                 const noLink = !item['Retail Link'] || !item['Retail Link'].startsWith('http');
-                if (noImg || noLink) needEnrich.push(i);
+                // Always enrich if we haven't fetched a product title yet
+                const noEnrichedName = !item._name_source;
+                if (noImg || noLink || noEnrichedName) needEnrich.push(i);
             });
 
             if (needEnrich.length === 0) {
