@@ -428,6 +428,7 @@ def _search_searxng(query, categories='general', max_instances=2):
 def _search_retailer_directly(upc, name=None):
     """Search major retailer websites directly by UPC/name and scrape product links.
     This bypasses search engine limitations by going straight to retailer search pages.
+    IMPORTANT: Detects "no results" pages to avoid returning random suggested products.
     Returns (url, title, source) or (None, None, None)."""
 
     upc_clean = re.sub(r'[^0-9]', '', str(upc)) if upc else ''
@@ -441,16 +442,33 @@ def _search_retailer_directly(upc, name=None):
             'name': 'Walmart',
             'url': f'https://www.walmart.com/search?q={urllib.parse.quote_plus(search_term)}',
             'product_pattern': r'walmart\.com/ip/',
+            # Walmart "no results" indicators
+            'no_results_patterns': [r'no results for', r'0 results for', r'try searching for something else'],
         },
         {
             'name': 'Amazon',
             'url': f'https://www.amazon.com/s?k={urllib.parse.quote_plus(search_term)}',
             'product_pattern': r'amazon\.com.*/dp/[A-Z0-9]{10}',
+            # Amazon "no results" — shows "No results for" then suggests random products
+            'no_results_patterns': [r'No results for', r'did not match any products', r'SUGGESTED', r'Consider these alternative'],
         },
         {
             'name': 'Target',
             'url': f'https://www.target.com/s?searchTerm={urllib.parse.quote_plus(search_term)}',
             'product_pattern': r'target\.com/.*/-/A-\d+',
+            'no_results_patterns': [r'No results found', r'we couldn\'t find', r'try a new search'],
+        },
+        {
+            'name': 'Home Depot',
+            'url': f'https://www.homedepot.com/s/{urllib.parse.quote_plus(search_term)}',
+            'product_pattern': r'homedepot\.com/p/',
+            'no_results_patterns': [r'no results', r'0 results', r'did not match'],
+        },
+        {
+            'name': 'Best Buy',
+            'url': f'https://www.bestbuy.com/site/searchpage.jsp?st={urllib.parse.quote_plus(search_term)}',
+            'product_pattern': r'bestbuy\.com/site/.*\.p',
+            'no_results_patterns': [r'No results found', r'0 Results', r'did not return any results'],
         },
     ]
 
@@ -466,6 +484,20 @@ def _search_retailer_directly(upc, name=None):
                 print(f"Direct {retailer['name']} search returned {resp.status_code}")
                 continue
 
+            page_text = resp.text
+
+            # ── CRITICAL: Check for "no results" page BEFORE scraping links ──
+            # Retailers show random suggested/sponsored products when UPC has no match.
+            # We must detect this and skip — otherwise we return wrong products.
+            is_no_results = False
+            for pattern in retailer.get('no_results_patterns', []):
+                if re.search(pattern, page_text, re.IGNORECASE):
+                    print(f"Direct {retailer['name']} search: NO RESULTS page detected for '{search_term}'")
+                    is_no_results = True
+                    break
+            if is_no_results:
+                continue
+
             # Check if we were redirected directly to a product page
             final_url = resp.url
             clean_url, source = _is_product_page_url(final_url)
@@ -474,24 +506,26 @@ def _search_retailer_directly(upc, name=None):
                 return clean_url, None, source
 
             # Parse the search results page for product links
-            soup = BeautifulSoup(resp.text, 'html.parser')
-            product_links = set()
+            soup = BeautifulSoup(page_text, 'html.parser')
+            product_links = []
 
             # Find all links matching product page patterns
+            seen_urls = set()
             for a in soup.find_all('a', href=True):
                 href = a['href']
                 # Make relative URLs absolute
                 if href.startswith('/'):
-                    parsed = urllib.parse.urlparse(retailer['url'])
-                    href = f'{parsed.scheme}://{parsed.netloc}{href}'
+                    parsed_url = urllib.parse.urlparse(retailer['url'])
+                    href = f'{parsed_url.scheme}://{parsed_url.netloc}{href}'
                 if re.search(retailer['product_pattern'], href):
                     clean_url, source = _is_product_page_url(href)
-                    if clean_url:
-                        product_links.add((clean_url, source))
+                    if clean_url and clean_url not in seen_urls:
+                        seen_urls.add(clean_url)
+                        product_links.append((clean_url, source))
 
             if product_links:
-                # Return the first product link found
-                url, source = list(product_links)[0]
+                # Return the first product link found (top search result)
+                url, source = product_links[0]
                 print(f"Direct {retailer['name']} search found product: {url}")
                 return url, None, source
 
@@ -644,14 +678,18 @@ def search_product_on_web(upc=None, name=None):
     upc_clean = re.sub(r'[^0-9]', '', str(upc)) if upc else ''
     has_upc = bool(upc_clean) and upc_clean not in ('0', '')
 
-    def _validate_and_return(url, source, original_name):
-        """Fetch page title, validate similarity, return result or None."""
+    def _validate_and_return(url, source, original_name, min_similarity=0.35):
+        """Fetch page title, validate similarity, return result or None.
+        min_similarity: minimum word-overlap score (0.0-1.0) to accept the result.
+        Default 0.35 means at least 35% of words from the shorter name must appear
+        in the longer name. This prevents returning random/suggested products."""
         page_title = _fetch_product_title_from_page(url)
         if original_name and page_title:
             sim = _name_similarity(original_name, page_title)
-            if sim < 0.2:
-                print(f'Result rejected (sim={sim:.2f}): "{page_title}" vs "{original_name}"')
+            if sim < min_similarity:
+                print(f'Result rejected (sim={sim:.2f} < {min_similarity}): "{page_title}" vs "{original_name}"')
                 return None
+            print(f'Result accepted (sim={sim:.2f}): "{page_title}" for "{original_name}"')
         return {'url': url, 'title': page_title, 'source': source}
 
     # ── Strategy 1: Direct retailer search (FAST — goes straight to retailer sites) ──
@@ -1202,7 +1240,7 @@ def _enrich_single_item(i, items):
             print(f'Enrichment UPC MATCH: "{original_name}" → "{info["title"]}" (source: {info["source"]})')
     elif info['title'] and original_name:
         sim = _name_similarity(original_name, info['title'])
-        if sim >= 0.2:
+        if sim >= 0.35:
             lookup_is_relevant = True
             print(f'Enrichment NAME MATCH (sim={sim:.2f}): "{original_name}" → "{info["title"]}"')
         else:
