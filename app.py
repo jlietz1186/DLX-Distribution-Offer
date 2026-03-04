@@ -426,13 +426,18 @@ def _search_searxng(query, categories='general', max_instances=2):
 
 
 def _search_retailer_directly(upc, name=None):
-    """Search major retailer websites directly by UPC/name and scrape product links.
-    This bypasses search engine limitations by going straight to retailer search pages.
-    IMPORTANT: Detects "no results" pages to avoid returning random suggested products.
+    """Search major retailer websites directly by UPC/name.
+    CRITICAL LOGIC:
+    - When searching by UPC: ONLY accept if the retailer REDIRECTS to a product page.
+      If still on search results page, no exact UPC match exists → return nothing.
+      This prevents returning random "suggested" products that Amazon/Walmart show.
+    - When searching by NAME: scrape product links from search results (with similarity
+      validation done later by the caller).
     Returns (url, title, source) or (None, None, None)."""
 
     upc_clean = re.sub(r'[^0-9]', '', str(upc)) if upc else ''
-    search_term = upc_clean if upc_clean else str(name or '').strip()
+    searching_by_upc = bool(upc_clean) and name is None
+    search_term = upc_clean if searching_by_upc else str(name or '').strip()
     if not search_term:
         return None, None, None
 
@@ -442,33 +447,26 @@ def _search_retailer_directly(upc, name=None):
             'name': 'Walmart',
             'url': f'https://www.walmart.com/search?q={urllib.parse.quote_plus(search_term)}',
             'product_pattern': r'walmart\.com/ip/',
-            # Walmart "no results" indicators
-            'no_results_patterns': [r'no results for', r'0 results for', r'try searching for something else'],
         },
         {
             'name': 'Amazon',
             'url': f'https://www.amazon.com/s?k={urllib.parse.quote_plus(search_term)}',
             'product_pattern': r'amazon\.com.*/dp/[A-Z0-9]{10}',
-            # Amazon "no results" — shows "No results for" then suggests random products
-            'no_results_patterns': [r'No results for', r'did not match any products', r'SUGGESTED', r'Consider these alternative'],
         },
         {
             'name': 'Target',
             'url': f'https://www.target.com/s?searchTerm={urllib.parse.quote_plus(search_term)}',
             'product_pattern': r'target\.com/.*/-/A-\d+',
-            'no_results_patterns': [r'No results found', r'we couldn\'t find', r'try a new search'],
         },
         {
             'name': 'Home Depot',
             'url': f'https://www.homedepot.com/s/{urllib.parse.quote_plus(search_term)}',
             'product_pattern': r'homedepot\.com/p/',
-            'no_results_patterns': [r'no results', r'0 results', r'did not match'],
         },
         {
             'name': 'Best Buy',
             'url': f'https://www.bestbuy.com/site/searchpage.jsp?st={urllib.parse.quote_plus(search_term)}',
             'product_pattern': r'bestbuy\.com/site/.*\.p',
-            'no_results_patterns': [r'No results found', r'0 Results', r'did not return any results'],
         },
     ]
 
@@ -484,36 +482,34 @@ def _search_retailer_directly(upc, name=None):
                 print(f"Direct {retailer['name']} search returned {resp.status_code}")
                 continue
 
-            page_text = resp.text
-
-            # ── CRITICAL: Check for "no results" page BEFORE scraping links ──
-            # Retailers show random suggested/sponsored products when UPC has no match.
-            # We must detect this and skip — otherwise we return wrong products.
-            is_no_results = False
-            for pattern in retailer.get('no_results_patterns', []):
-                if re.search(pattern, page_text, re.IGNORECASE):
-                    print(f"Direct {retailer['name']} search: NO RESULTS page detected for '{search_term}'")
-                    is_no_results = True
-                    break
-            if is_no_results:
-                continue
-
             # Check if we were redirected directly to a product page
+            # This is the ONLY way to accept UPC search results — a redirect means
+            # the retailer found an exact match for this barcode.
             final_url = resp.url
             clean_url, source = _is_product_page_url(final_url)
             if clean_url:
                 print(f"Direct {retailer['name']} search redirected to product: {clean_url}")
                 return clean_url, None, source
 
-            # Parse the search results page for product links
+            # ── UPC SEARCH: STOP HERE ──
+            # If we searched by UPC and didn't get redirected to a product page,
+            # that means the retailer has no exact match for this barcode.
+            # Do NOT scrape links from the search results — they will be random
+            # "suggested" products that are NOT the correct item.
+            if searching_by_upc:
+                print(f"Direct {retailer['name']} UPC search: no redirect to product page — skipping (no exact match)")
+                continue
+
+            # ── NAME SEARCH: Scrape product links from results ──
+            # For name-based searches, it's OK to scrape links because the caller
+            # will validate them with similarity checking.
+            page_text = resp.text
             soup = BeautifulSoup(page_text, 'html.parser')
             product_links = []
 
-            # Find all links matching product page patterns
             seen_urls = set()
             for a in soup.find_all('a', href=True):
                 href = a['href']
-                # Make relative URLs absolute
                 if href.startswith('/'):
                     parsed_url = urllib.parse.urlparse(retailer['url'])
                     href = f'{parsed_url.scheme}://{parsed_url.netloc}{href}'
@@ -524,12 +520,11 @@ def _search_retailer_directly(upc, name=None):
                         product_links.append((clean_url, source))
 
             if product_links:
-                # Return the first product link found (top search result)
                 url, source = product_links[0]
-                print(f"Direct {retailer['name']} search found product: {url}")
+                print(f"Direct {retailer['name']} name search found product: {url}")
                 return url, None, source
 
-            print(f"Direct {retailer['name']} search: no product links found in results")
+            print(f"Direct {retailer['name']} name search: no product links found in results")
         except Exception as e:
             print(f"Direct {retailer['name']} search error: {e}")
             continue
@@ -667,31 +662,9 @@ def _name_similarity(name1, name2):
     return len(overlap) / len(shorter)
 
 
-def _verify_upc_on_page(url, upc_clean, page_text=None):
-    """Check if a UPC number actually appears on a product page.
-    If the UPC doesn't appear, the page is probably a random/suggested product,
-    not a genuine match for this barcode. Returns True if verified."""
-    if not upc_clean or len(upc_clean) < 8:
-        return True  # Can't verify short/invalid UPCs, assume OK
-    try:
-        if page_text is None:
-            resp = requests.get(url, headers=BROWSER_HEADERS, timeout=6, allow_redirects=True)
-            if resp.status_code != 200:
-                return False
-            page_text = resp.text
-        # Check if the UPC appears anywhere on the page
-        if upc_clean in page_text:
-            return True
-        # Also check with common formatting (dashes, spaces)
-        if len(upc_clean) == 12:
-            formatted = f'{upc_clean[:1]}-{upc_clean[1:6]}-{upc_clean[6:11]}-{upc_clean[11:]}'
-            if formatted in page_text:
-                return True
-        print(f'UPC {upc_clean} NOT found on page {url[:60]} — likely wrong product')
-        return False
-    except Exception as e:
-        print(f'UPC page verification error: {e}')
-        return False
+# _verify_upc_on_page REMOVED — unreliable because Amazon/Walmart pages are
+# JS-rendered and UPC numbers don't appear in raw HTML. The redirect-based
+# detection in _search_retailer_directly is much more reliable.
 
 
 def search_product_on_web(upc=None, name=None):
@@ -707,10 +680,9 @@ def search_product_on_web(upc=None, name=None):
 
     def _validate_and_return(url, source, original_name, searched_by_upc=False):
         """Fetch page title and validate the result is the correct product.
-        Three checks:
-        1. If we searched by UPC, verify the UPC appears on the product page
-        2. If we can't fetch a page title, reject (can't verify)
-        3. Name similarity must pass threshold (higher for short names)
+        Two checks:
+        1. If we can't fetch a page title, reject (can't verify)
+        2. Name similarity must pass threshold (higher for short names)
         Returns result dict or None."""
         try:
             # Fetch the actual product page
@@ -722,11 +694,6 @@ def search_product_on_web(upc=None, name=None):
         except Exception as e:
             print(f'Page fetch error for {url[:60]}: {e}')
             return None
-
-        # CHECK 1: If searched by UPC, verify UPC appears on the page
-        if searched_by_upc and has_upc:
-            if not _verify_upc_on_page(url, upc_clean, page_text=page_text):
-                return None
 
         # Extract page title
         page_title = None
@@ -762,12 +729,12 @@ def search_product_on_web(upc=None, name=None):
         except Exception:
             pass
 
-        # CHECK 2: If we can't get a title, reject — we can't verify this is right
+        # CHECK 1: If we can't get a title, reject — we can't verify this is right
         if not page_title:
             print(f'Could not extract title from {url[:60]} — rejecting')
             return None
 
-        # CHECK 3: Name similarity — require higher threshold for short names
+        # CHECK 2: Name similarity — require higher threshold for short names
         if original_name:
             sim = _name_similarity(original_name, page_title)
             # Short names (1-3 meaningful words) need higher threshold because
@@ -1327,10 +1294,31 @@ def _enrich_single_item(i, items):
     info = lookup_product_info(upc=upc, name=original_name)
 
     # ── TRUST LEVEL ──
-    if info['upc_matched']:
+    # Even UPC database results must be validated against the original name.
+    # UPC databases can have wrong/outdated entries, or the UPC may map to a
+    # different variant. If the title doesn't match, keep the original name
+    # but still use the link/image if available.
+    if info['upc_matched'] and info['title'] and original_name:
+        sim = _name_similarity(original_name, info['title'])
+        clean_words = set(re.sub(r'[^a-z0-9\s]', '', original_name.lower()).split())
+        _stop = {'the', 'a', 'an', 'and', 'or', 'of', 'for', 'in', 'with', 'to', 'by',
+                'is', 'at', 'on', 'from', 'pack', 'ct', 'oz', 'lb', 'count', 'ea',
+                'each', 'per', 'size', 'new', 'free', 'buy', 'best', 'top', 'item'}
+        meaningful_words = clean_words - _stop
+        min_sim = 0.55 if len(meaningful_words) <= 3 else 0.35
+        if sim >= min_sim:
+            lookup_is_relevant = True
+            print(f'Enrichment UPC MATCH validated (sim={sim:.2f} >= {min_sim}): "{original_name}" → "{info["title"]}" (source: {info["source"]})')
+        else:
+            # UPC matched but title doesn't match — use link/image but keep original name
+            lookup_is_relevant = True
+            upc_title_was = info['title']
+            info['title'] = None  # Don't override the name
+            print(f'Enrichment UPC MATCH but title mismatch (sim={sim:.2f} < {min_sim}): keeping original name "{original_name}" (UPC title was: "{upc_title_was}")')
+    elif info['upc_matched'] and not original_name:
         lookup_is_relevant = True
         if info['title']:
-            print(f'Enrichment UPC MATCH: "{original_name}" → "{info["title"]}" (source: {info["source"]})')
+            print(f'Enrichment UPC MATCH (no original name): → "{info["title"]}" (source: {info["source"]})')
     elif info['title'] and original_name:
         sim = _name_similarity(original_name, info['title'])
         # Higher threshold for short names (1-3 meaningful words) since one
