@@ -491,13 +491,31 @@ def _search_retailer_directly(upc, name=None):
                 print(f"Direct {retailer['name']} search redirected to product: {clean_url}")
                 return clean_url, None, source
 
-            # ── UPC SEARCH: STOP HERE ──
-            # If we searched by UPC and didn't get redirected to a product page,
-            # that means the retailer has no exact match for this barcode.
-            # Do NOT scrape links from the search results — they will be random
-            # "suggested" products that are NOT the correct item.
+            # ── UPC SEARCH: Check results carefully ──
             if searching_by_upc:
-                print(f"Direct {retailer['name']} UPC search: no redirect to product page — skipping (no exact match)")
+                page_text = resp.text
+                # Check if this is a "no results" page — if so, skip entirely
+                _no_result_indicators = [r'No results', r'0 results', r'did not match',
+                                         r"couldn't find", r'try a new search',
+                                         r'did not return any results', r'no products found']
+                _is_empty = any(re.search(p, page_text, re.IGNORECASE) for p in _no_result_indicators)
+                if _is_empty:
+                    print(f"Direct {retailer['name']} UPC search: NO RESULTS page for '{search_term}' — skipping")
+                    continue
+                # Page HAS results (retailer found something for this UPC but didn't redirect).
+                # Accept ONLY the very first product link — it's the best match.
+                soup = BeautifulSoup(page_text, 'html.parser')
+                for a in soup.find_all('a', href=True):
+                    href = a['href']
+                    if href.startswith('/'):
+                        parsed_url = urllib.parse.urlparse(retailer['url'])
+                        href = f'{parsed_url.scheme}://{parsed_url.netloc}{href}'
+                    if re.search(retailer['product_pattern'], href):
+                        first_url, first_source = _is_product_page_url(href)
+                        if first_url:
+                            print(f"Direct {retailer['name']} UPC search found first product: {first_url}")
+                            return first_url, None, first_source
+                print(f"Direct {retailer['name']} UPC search: no product links in results — skipping")
                 continue
 
             # ── NAME SEARCH: Scrape product links from results ──
@@ -766,8 +784,10 @@ def search_product_on_web(upc=None, name=None):
         except Exception as e:
             print(f'Direct UPC retailer search failed: {e}')
 
-    # Direct search by product name
-    if name:
+    # Direct search by product name — ONLY when NO UPC is available.
+    # When we have a UPC, name-based retailer search produces too many false positives
+    # (random products with vaguely similar names). Skip it.
+    if name and not has_upc:
         try:
             direct_url, _, direct_source = _search_retailer_directly(None, name)
             if direct_url:
@@ -789,7 +809,8 @@ def search_product_on_web(upc=None, name=None):
         except Exception:
             pass
 
-    if name:
+    # SearXNG name search — ONLY when NO UPC available (same false-positive issue)
+    if name and not has_upc:
         try:
             clean_name = str(name).strip()
             url, snippet_title, source = _search_searxng(f'{clean_name} buy', max_instances=2)
