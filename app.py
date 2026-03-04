@@ -1059,8 +1059,15 @@ def lookup_product_info(upc=None, name=None):
     # It's better to leave the link blank than to give a search page that may
     # show unrelated products. The enrichment UI will show a dash for missing links.
 
-    # Cache the result (even if empty, to avoid re-hitting rate-limited APIs)
-    _lookup_cache[cache_key] = result.copy()
+    # v4.1: Only cache results that found SOMETHING useful (title, link, or image).
+    # DON'T cache completely empty results — those might be due to temporary failures
+    # (SearXNG down, rate limits, network issues). Retrying should try fresh.
+    has_any_result = result['title'] or result['retail_link'] or result['image']
+    if has_any_result:
+        _lookup_cache[cache_key] = result.copy()
+        print(f'  Cached result for {cache_key[:40]}')
+    else:
+        print(f'  NOT caching empty result for {cache_key[:40]} (will retry on next enrichment)')
 
     return result
 
