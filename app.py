@@ -259,7 +259,7 @@ def _resolve_redirect_url(url):
         return url
     try:
         # Use HEAD request with redirects to find final URL
-        resp = requests.head(url, headers=BROWSER_HEADERS, timeout=8, allow_redirects=True)
+        resp = requests.head(url, headers=BROWSER_HEADERS, timeout=5, allow_redirects=True)
         final_url = resp.url
         if final_url and final_url != url:
             print(f'Resolved redirect: {url[:80]} → {final_url[:80]}')
@@ -361,16 +361,28 @@ SEARXNG_INSTANCES = [
 ]
 
 
-def _search_searxng(query, categories='general'):
+_searxng_dead_instances = {}  # Track instances that keep failing
+
+def _search_searxng(query, categories='general', max_instances=2):
     """Search using SearXNG public instances (JSON API).
-    Tries multiple instances for reliability.
+    Tries up to max_instances for speed (default 2).
+    Skips instances that have failed recently.
     Returns (url, title, source) or (None, None, None)."""
     import random
-    # Shuffle instances so we spread load
-    instances = SEARXNG_INSTANCES.copy()
-    random.shuffle(instances)
+    # Filter out recently-dead instances (failed in last 5 min)
+    now = time.time()
+    alive = [i for i in SEARXNG_INSTANCES if now - _searxng_dead_instances.get(i, 0) > 300]
+    if not alive:
+        # All dead — reset and try again
+        alive = SEARXNG_INSTANCES.copy()
+        _searxng_dead_instances.clear()
+    random.shuffle(alive)
 
-    for instance in instances:
+    tried = 0
+    for instance in alive:
+        if tried >= max_instances:
+            break
+        tried += 1
         try:
             resp = requests.get(
                 f'{instance}/search',
@@ -381,7 +393,7 @@ def _search_searxng(query, categories='general'):
                     'language': 'en',
                 },
                 headers=BROWSER_HEADERS,
-                timeout=12
+                timeout=6  # Short timeout — fail fast, try next
             )
             if resp.status_code == 200:
                 data = resp.json()
@@ -398,12 +410,16 @@ def _search_searxng(query, categories='general'):
                         title = re.sub(r'\s*[:\-–|]\s*(Amazon\.com|Walmart|Target|Home Depot|Costco|Best Buy|eBay)\s*$', '', title).strip()
                         print(f'SearXNG ({instance}) found: {clean_url} — "{title}"')
                         return clean_url, title, source
-                # Had results but none were product pages
+                # Had results but none were product pages — don't try more instances,
+                # the query itself probably won't match on other instances either
                 print(f'SearXNG ({instance}) returned {len(results)} results but no product pages for: {query}')
+                break
             else:
                 print(f'SearXNG ({instance}) returned status {resp.status_code}')
+                _searxng_dead_instances[instance] = time.time()
         except Exception as e:
             print(f'SearXNG ({instance}) error: {e}')
+            _searxng_dead_instances[instance] = time.time()
             continue
 
     return None, None, None
@@ -443,7 +459,7 @@ def _search_retailer_directly(upc, name=None):
             resp = requests.get(
                 retailer['url'],
                 headers=BROWSER_HEADERS,
-                timeout=10,
+                timeout=6,
                 allow_redirects=True
             )
             if resp.status_code != 200:
@@ -490,7 +506,7 @@ def _search_retailer_directly(upc, name=None):
 def _fetch_product_title_from_page(url):
     """Fetch a product page and extract the title. Returns title string or None."""
     try:
-        resp = requests.get(url, headers=BROWSER_HEADERS, timeout=10, allow_redirects=True)
+        resp = requests.get(url, headers=BROWSER_HEADERS, timeout=6, allow_redirects=True)
         if resp.status_code == 200:
             soup = BeautifulSoup(resp.text, 'html.parser')
 
@@ -534,7 +550,7 @@ def _fetch_product_image_from_page(url):
     """Fetch a product page and extract the main product image URL.
     Returns image URL string or None."""
     try:
-        resp = requests.get(url, headers=BROWSER_HEADERS, timeout=10, allow_redirects=True)
+        resp = requests.get(url, headers=BROWSER_HEADERS, timeout=6, allow_redirects=True)
         if resp.status_code != 200:
             return None
         soup = BeautifulSoup(resp.text, 'html.parser')
@@ -618,9 +634,9 @@ def _name_similarity(name1, name2):
 
 
 def search_product_on_web(upc=None, name=None):
-    """Search for a product on major retail sites using multiple strategies:
-    1. SearXNG meta-search (general + shopping categories)
-    2. Direct retailer website search (scrape Walmart/Amazon/Target search pages)
+    """Search for a product on major retail sites. Priority order:
+    1. Direct retailer search (fastest, most reliable from datacenter IPs)
+    2. SearXNG meta-search (fallback only — many instances block datacenter IPs)
     ONLY returns results that are actual product pages.
     Returns dict with keys: url, title, source."""
     result = {'url': None, 'title': None, 'source': None}
@@ -628,87 +644,63 @@ def search_product_on_web(upc=None, name=None):
     upc_clean = re.sub(r'[^0-9]', '', str(upc)) if upc else ''
     has_upc = bool(upc_clean) and upc_clean not in ('0', '')
 
-    # ── Strategy 1: SearXNG meta-search with multiple query patterns ──
-    queries = []
+    def _validate_and_return(url, source, original_name):
+        """Fetch page title, validate similarity, return result or None."""
+        page_title = _fetch_product_title_from_page(url)
+        if original_name and page_title:
+            sim = _name_similarity(original_name, page_title)
+            if sim < 0.2:
+                print(f'Result rejected (sim={sim:.2f}): "{page_title}" vs "{original_name}"')
+                return None
+        return {'url': url, 'title': page_title, 'source': source}
+
+    # ── Strategy 1: Direct retailer search (FAST — goes straight to retailer sites) ──
+    # Search by UPC first, then by name
     if has_upc:
-        # UPC-based queries — multiple patterns for better coverage
-        queries.append((f'{upc_clean}', 'general'))
-        queries.append((f'{upc_clean} buy', 'general'))
-        queries.append((f'{upc_clean}', 'shopping'))  # Shopping category often has better product results
-        queries.append((f'UPC {upc_clean}', 'general'))
-    if name:
-        clean_name = str(name).strip()
-        if clean_name:
-            queries.append((f'{clean_name} buy', 'general'))
-            queries.append((f'{clean_name}', 'shopping'))
-            queries.append((f'{clean_name} amazon walmart target', 'general'))
-
-    for query, category in queries:
         try:
-            url, snippet_title, source = _search_searxng(query, categories=category)
-            if url:
-                # ALWAYS fetch the real product title from the actual page.
-                page_title = _fetch_product_title_from_page(url)
-                title = page_title if page_title else snippet_title
-                print(f'Web search: snippet="{snippet_title}" → page="{page_title}" for {url}')
-
-                # VALIDATION: verify relevance if we have an original name
-                if name and title:
-                    sim = _name_similarity(name, title)
-                    if sim < 0.2:
-                        print(f'SearXNG result rejected (sim={sim:.2f}): "{title}" vs "{name}"')
-                        continue  # Try next query
-
-                result = {'url': url, 'title': title, 'source': source}
-                return result
-        except Exception as e:
-            print(f'SearXNG search failed for "{query}": {e}')
-            continue
-
-    # ── Strategy 2: Direct retailer website search ──
-    # Search Walmart/Amazon/Target directly — this works even when SearXNG
-    # can't find results, because retailers index products by UPC internally
-    if has_upc or name:
-        try:
-            direct_url, _, direct_source = _search_retailer_directly(upc, name)
+            direct_url, _, direct_source = _search_retailer_directly(upc, None)
             if direct_url:
-                # Fetch real title from the product page
-                page_title = _fetch_product_title_from_page(direct_url)
-                print(f'Direct retailer search found: {direct_url} — title="{page_title}"')
-
-                # Validate if we have an original name
-                if name and page_title:
-                    sim = _name_similarity(name, page_title)
-                    if sim < 0.2:
-                        print(f'Direct search result rejected (sim={sim:.2f}): "{page_title}" vs "{name}"')
-                    else:
-                        result = {'url': direct_url, 'title': page_title, 'source': direct_source}
-                        return result
-                else:
-                    result = {'url': direct_url, 'title': page_title, 'source': direct_source}
-                    return result
+                r = _validate_and_return(direct_url, direct_source, name)
+                if r:
+                    print(f'Direct UPC retailer search hit: {direct_url}')
+                    return r
         except Exception as e:
-            print(f'Direct retailer search failed: {e}')
+            print(f'Direct UPC retailer search failed: {e}')
 
-    # ── Strategy 3: If UPC search failed but we have a name, try name on retailers directly ──
-    if not result['url'] and name and has_upc:
+    # Direct search by product name
+    if name:
         try:
             direct_url, _, direct_source = _search_retailer_directly(None, name)
             if direct_url:
-                page_title = _fetch_product_title_from_page(direct_url)
-                print(f'Direct retailer name search found: {direct_url} — title="{page_title}"')
-                if page_title:
-                    sim = _name_similarity(name, page_title)
-                    if sim >= 0.2:
-                        result = {'url': direct_url, 'title': page_title, 'source': direct_source}
-                        return result
-                    else:
-                        print(f'Direct name search rejected (sim={sim:.2f}): "{page_title}" vs "{name}"')
-                else:
-                    result = {'url': direct_url, 'title': page_title, 'source': direct_source}
-                    return result
+                r = _validate_and_return(direct_url, direct_source, name)
+                if r:
+                    print(f'Direct name retailer search hit: {direct_url}')
+                    return r
         except Exception as e:
-            print(f'Direct retailer name search failed: {e}')
+            print(f'Direct name retailer search failed: {e}')
+
+    # ── Strategy 2: SearXNG meta-search (SLOW fallback — most instances fail from datacenter) ──
+    # Only try 1 query to keep it fast. If SearXNG is working, one query is enough.
+    if has_upc:
+        try:
+            url, snippet_title, source = _search_searxng(f'{upc_clean}', max_instances=2)
+            if url:
+                r = _validate_and_return(url, source, name)
+                if r:
+                    return r
+        except Exception:
+            pass
+
+    if name:
+        try:
+            clean_name = str(name).strip()
+            url, snippet_title, source = _search_searxng(f'{clean_name} buy', max_instances=2)
+            if url:
+                r = _validate_and_return(url, source, name)
+                if r:
+                    return r
+        except Exception:
+            pass
 
     return result
 
@@ -733,7 +725,7 @@ def lookup_product_info(upc=None, name=None):
         try:
             resp = requests.get(
                 f'https://api.upcitemdb.com/prod/trial/lookup?upc={upc_clean}',
-                timeout=8,
+                timeout=5,
                 headers={'Accept': 'application/json'}
             )
             if resp.status_code == 429:
@@ -805,7 +797,7 @@ def lookup_product_info(upc=None, name=None):
         try:
             resp = requests.get(
                 f'https://world.openfoodfacts.org/api/v0/product/{upc_clean}.json',
-                timeout=8
+                timeout=5
             )
             if resp.status_code == 200:
                 data = resp.json()
@@ -827,63 +819,13 @@ def lookup_product_info(upc=None, name=None):
         except Exception:
             pass
 
-    # ── 3. Go-UPC API ──
-    if has_upc and (not result['title'] or not result['image']):
-        try:
-            resp = requests.get(
-                f'https://go-upc.com/api/v1/code/{upc_clean}',
-                timeout=8,
-                headers={'Accept': 'application/json'}
-            )
-            if resp.status_code == 200:
-                data = resp.json()
-                prod = data.get('product', {})
-                if prod:
-                    if not result['title']:
-                        go_name = prod.get('name', '').strip()
-                        if go_name:
-                            result['title'] = go_name
-                            if not result['source']:
-                                result['source'] = 'Go-UPC'
-                    if not result['image']:
-                        img = prod.get('imageUrl')
-                        if img:
-                            result['image'] = img
-        except Exception:
-            pass
-
-    # ── 4. Barcode Lookup ──
-    if has_upc and (not result['title'] or not result['image']):
-        try:
-            resp = requests.get(
-                f'https://www.barcodelookup.com/restapi?barcode={upc_clean}',
-                timeout=8,
-                headers={'Accept': 'application/json'}
-            )
-            if resp.status_code == 200:
-                data = resp.json()
-                products = data.get('products', [])
-                if products:
-                    if not result['title']:
-                        bl_name = products[0].get('title', '').strip() or products[0].get('product_name', '').strip()
-                        if bl_name:
-                            result['title'] = bl_name
-                            if not result['source']:
-                                result['source'] = 'Barcode Lookup'
-                    if not result['image']:
-                        images = products[0].get('images', [])
-                        if images:
-                            result['image'] = images[0]
-        except Exception:
-            pass
-
-    # ── 5. Open Food Facts search by name (fallback when no UPC) ──
+    # ── 3. Open Food Facts search by name (fallback for food/grocery items) ──
     if not result['image'] and name:
         try:
             q = urllib.parse.quote_plus(str(name))
             resp = requests.get(
                 f'https://world.openfoodfacts.org/cgi/search.pl?search_terms={q}&search_simple=1&action=process&json=1&page_size=1',
-                timeout=8
+                timeout=5
             )
             if resp.status_code == 200:
                 data = resp.json()
@@ -933,7 +875,7 @@ def download_image(url, max_size_kb=500):
     if 'google.com/search' in url:
         return None, None
     try:
-        resp = requests.get(url, timeout=10, stream=True, headers={
+        resp = requests.get(url, timeout=6, stream=True, headers={
             'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
         })
         if resp.status_code != 200:
@@ -1147,7 +1089,7 @@ def debug_lookup():
     try:
         resp = requests.get(
             f'https://api.upcitemdb.com/prod/trial/lookup?upc={upc_clean}',
-            timeout=10, headers={'Accept': 'application/json'}
+            timeout=6, headers={'Accept': 'application/json'}
         )
         results['tests']['upcitemdb'] = {
             'status_code': resp.status_code,
@@ -1161,7 +1103,7 @@ def debug_lookup():
     try:
         resp = requests.get(
             f'https://world.openfoodfacts.org/api/v0/product/{upc_clean}.json',
-            timeout=10
+            timeout=6
         )
         results['tests']['openfoodfacts'] = {
             'status_code': resp.status_code,
@@ -1236,99 +1178,109 @@ def debug_lookup():
     return jsonify(results)
 
 
+def _enrich_single_item(i, items):
+    """Enrich a single item — designed to run in a thread pool."""
+    if i >= len(items):
+        return None
+    item = items[i].copy()
+    upc = item.get('UPC/Item #', '')
+    original_name = item.get('Item Name', '').strip()
+
+    # Check what's missing
+    img_val = item.get('Image', '')
+    needs_image = not img_val or (not img_val.startswith('http') and not img_val.startswith('/serve_image/'))
+    link_val = item.get('Retail Link', '')
+    needs_link = not link_val or not link_val.startswith('http')
+
+    # Look up product info
+    info = lookup_product_info(upc=upc, name=original_name)
+
+    # ── TRUST LEVEL ──
+    if info['upc_matched']:
+        lookup_is_relevant = True
+        if info['title']:
+            print(f'Enrichment UPC MATCH: "{original_name}" → "{info["title"]}" (source: {info["source"]})')
+    elif info['title'] and original_name:
+        sim = _name_similarity(original_name, info['title'])
+        if sim >= 0.2:
+            lookup_is_relevant = True
+            print(f'Enrichment NAME MATCH (sim={sim:.2f}): "{original_name}" → "{info["title"]}"')
+        else:
+            lookup_is_relevant = False
+            print(f'Enrichment REJECTED (sim={sim:.2f}): "{original_name}" ≠ "{info["title"]}" — keeping original')
+    elif info['title'] and not original_name:
+        lookup_is_relevant = True
+    else:
+        lookup_is_relevant = False
+
+    # ── Item Name enrichment ──
+    if lookup_is_relevant and info['title']:
+        item['Item Name'] = info['title']
+        if info['source']:
+            item['_name_source'] = info['source']
+
+    # ── Image enrichment ──
+    if needs_image and info['image'] and lookup_is_relevant:
+        item['Image'] = info['image']
+
+    # ── Retail link enrichment ──
+    if needs_link and info['retail_link'] and lookup_is_relevant:
+        retail_url = info['retail_link']
+        is_search_page = (
+            '/s?' in retail_url or
+            '/s/' in retail_url or
+            '/search?' in retail_url or
+            '/search/' in retail_url or
+            'query=' in retail_url or
+            'keywords=' in retail_url
+        )
+        product_url, _ = _is_product_page_url(retail_url)
+        if product_url:
+            item['Retail Link'] = product_url
+        elif not is_search_page:
+            item['Retail Link'] = retail_url
+
+    # ── Image from retail link fallback ──
+    img_val_now = item.get('Image', '')
+    still_needs_image = not img_val_now or (not img_val_now.startswith('http') and not img_val_now.startswith('/serve_image/'))
+    retail_link_now = item.get('Retail Link', '')
+    if still_needs_image and retail_link_now and retail_link_now.startswith('http'):
+        try:
+            scraped_img = _fetch_product_image_from_page(retail_link_now)
+            if scraped_img:
+                item['Image'] = scraped_img
+                print(f'Scraped image from retail page: {retail_link_now[:60]} → {scraped_img[:80]}')
+        except Exception as e:
+            print(f'Image scrape failed for {retail_link_now[:60]}: {e}')
+
+    return {'index': i, 'item': item}
+
+
 @app.route('/enrich', methods=['POST'])
 def enrich_data():
-    """Look up images, retail links, and product titles for items that need them."""
+    """Look up images, retail links, and product titles for items that need them.
+    Uses thread pool for parallel lookups to dramatically speed up enrichment."""
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+
     data = request.json
     session_id = data.get('session_id')
     items = data.get('items', [])
     indices = data.get('indices', [])
 
+    # Process items in parallel — 3 threads balances speed vs Render free tier resources
     enriched = []
-    for i in indices:
-        if i >= len(items):
-            continue
-        item = items[i].copy()
-        upc = item.get('UPC/Item #', '')
-        original_name = item.get('Item Name', '').strip()
-
-        # Check what's missing
-        img_val = item.get('Image', '')
-        needs_image = not img_val or (not img_val.startswith('http') and not img_val.startswith('/serve_image/'))
-        link_val = item.get('Retail Link', '')
-        needs_link = not link_val or not link_val.startswith('http')
-
-        # Look up product info
-        info = lookup_product_info(upc=upc, name=original_name)
-
-        # ── TRUST LEVEL ──
-        # UPC API lookups (UPCitemdb, Open Food Facts by barcode, etc.) are TRUSTED
-        # because they match on the exact barcode — the product IS correct.
-        # Web search results are UNTRUSTED and need name similarity validation.
-        if info['upc_matched']:
-            # Direct UPC barcode match — trust the result completely
-            lookup_is_relevant = True
-            if info['title']:
-                print(f'Enrichment UPC MATCH: "{original_name}" → "{info["title"]}" (source: {info["source"]})')
-        elif info['title'] and original_name:
-            # Web search result — validate against original name
-            sim = _name_similarity(original_name, info['title'])
-            if sim >= 0.2:
-                lookup_is_relevant = True
-                print(f'Enrichment NAME MATCH (sim={sim:.2f}): "{original_name}" → "{info["title"]}"')
-            else:
-                lookup_is_relevant = False
-                print(f'Enrichment REJECTED (sim={sim:.2f}): "{original_name}" ≠ "{info["title"]}" — keeping original')
-        elif info['title'] and not original_name:
-            # No original name to compare — accept whatever we found
-            lookup_is_relevant = True
-        else:
-            lookup_is_relevant = False
-
-        # ── Item Name enrichment ──
-        if lookup_is_relevant and info['title']:
-            item['Item Name'] = info['title']
-            if info['source']:
-                item['_name_source'] = info['source']
-
-        # ── Image enrichment ──
-        if needs_image and info['image'] and lookup_is_relevant:
-            item['Image'] = info['image']
-
-        # ── Retail link enrichment ──
-        if needs_link and info['retail_link'] and lookup_is_relevant:
-            retail_url = info['retail_link']
-            # Reject search page URLs — only accept actual product pages
-            is_search_page = (
-                '/s?' in retail_url or
-                '/s/' in retail_url or
-                '/search?' in retail_url or
-                '/search/' in retail_url or
-                'query=' in retail_url or
-                'keywords=' in retail_url
-            )
-            product_url, _ = _is_product_page_url(retail_url)
-            if product_url:
-                item['Retail Link'] = product_url
-            elif not is_search_page:
-                item['Retail Link'] = retail_url
-
-        # ── Image from retail link fallback ──
-        # If we still have no image but DO have a retail link, try scraping the
-        # product image directly from the retail page
-        img_val_now = item.get('Image', '')
-        still_needs_image = not img_val_now or (not img_val_now.startswith('http') and not img_val_now.startswith('/serve_image/'))
-        retail_link_now = item.get('Retail Link', '')
-        if still_needs_image and retail_link_now and retail_link_now.startswith('http'):
+    with ThreadPoolExecutor(max_workers=3) as executor:
+        futures = {executor.submit(_enrich_single_item, i, items): i for i in indices}
+        for future in as_completed(futures):
             try:
-                scraped_img = _fetch_product_image_from_page(retail_link_now)
-                if scraped_img:
-                    item['Image'] = scraped_img
-                    print(f'Scraped image from retail page: {retail_link_now[:60]} → {scraped_img[:80]}')
+                result = future.result()
+                if result:
+                    enriched.append(result)
             except Exception as e:
-                print(f'Image scrape failed for {retail_link_now[:60]}: {e}')
+                print(f'Enrichment thread error for index {futures[future]}: {e}')
 
-        enriched.append({'index': i, 'item': item})
+    # Sort by index to maintain order
+    enriched.sort(key=lambda x: x['index'])
 
     return jsonify({'enriched': enriched})
 
