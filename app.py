@@ -13,7 +13,7 @@ app = Flask(__name__)
 app.secret_key = os.environ.get('SECRET_KEY', 'dlx-offer-tool-dev-key-change-in-prod')
 
 # ── Enrichment version tag — printed in logs so we can verify correct deployment ──
-ENRICHMENT_VERSION = 'v4.3-2026-03-04'
+ENRICHMENT_VERSION = 'v4.4-2026-03-04'
 print(f'╔══════════════════════════════════════════════════════════╗')
 print(f'║  DLX Offer Formatter — Enrichment Engine {ENRICHMENT_VERSION}  ║')
 print(f'╚══════════════════════════════════════════════════════════╝')
@@ -215,6 +215,36 @@ def parse_pdf(filepath):
 # Priority order for retail sources (1st tier)
 RETAIL_PRIORITY = ['amazon', 'walmart', 'target', 'costco', 'kroger', 'walgreens', 'cvs', 'ebay', 'bestbuy', 'homedepot']
 
+# v4.4: When picking a product link from search results, prefer brick-and-mortar retailers
+# over Amazon. Amazon is always easy for users to find; links from HD/Walmart/Target are
+# much more valuable in the offer sheet. Amazon is a fallback, not the first choice.
+LINK_PICK_PRIORITY = ['homedepot', 'walmart', 'target', 'bestbuy', 'costco', 'amazon', 'kroger', 'walgreens', 'cvs', 'ebay']
+
+
+def _pick_best_product_url(candidates):
+    """Given a list of (url, title, source) tuples, pick the best one by retailer priority.
+    Prefers Home Depot > Walmart > Target > Best Buy > Amazon.
+    Returns (url, title, source) or (None, None, None)."""
+    if not candidates:
+        return None, None, None
+    if len(candidates) == 1:
+        return candidates[0]
+
+    # Score each candidate by retailer priority
+    def _score(item):
+        url = (item[0] or '').lower()
+        source = (item[2] or '').lower()
+        for idx, retailer in enumerate(LINK_PICK_PRIORITY):
+            if retailer in url or retailer in source:
+                return idx
+        return len(LINK_PICK_PRIORITY)  # unknown retailer — lowest priority
+
+    candidates.sort(key=_score)
+    best = candidates[0]
+    print(f'  _pick_best_product_url: {len(candidates)} candidates, picked {best[2] or "unknown"}: {best[0][:60]}')
+    return best
+
+
 # Browser-like headers for web scraping
 BROWSER_HEADERS = {
     'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
@@ -383,11 +413,12 @@ SEARXNG_INSTANCES = [
 
 _searxng_dead_instances = {}  # Track instances that keep failing
 
-def _search_searxng(query, categories='general', max_instances=3):
+def _search_searxng(query, categories='general', max_instances=3, collect_all=False):
     """Search using SearXNG public instances (JSON API).
     Tries up to max_instances for speed (default 3).
     Skips instances that have failed recently.
-    Returns (url, title, source) or (None, None, None)."""
+    If collect_all=True, returns list of ALL (url, title, source) tuples found.
+    Otherwise returns single best (url, title, source) or (None, None, None)."""
     import random
     # Filter out recently-dead instances (failed in last 5 min)
     now = time.time()
@@ -398,6 +429,8 @@ def _search_searxng(query, categories='general', max_instances=3):
         _searxng_dead_instances.clear()
     random.shuffle(alive)
 
+    all_found = []
+    seen_sources = set()
     tried = 0
     for instance in alive:
         if tried >= max_instances:
@@ -413,7 +446,7 @@ def _search_searxng(query, categories='general', max_instances=3):
                     'language': 'en',
                 },
                 headers=BROWSER_HEADERS,
-                timeout=8  # Slightly longer timeout for reliability
+                timeout=8
             )
             if resp.status_code == 200:
                 data = resp.json()
@@ -425,14 +458,16 @@ def _search_searxng(query, categories='general', max_instances=3):
                         continue
                     clean_url, source = _is_product_page_url(url)
                     if clean_url and source:
-                        # Clean up title
+                        source_key = source.lower()
+                        if source_key in seen_sources:
+                            continue
+                        seen_sources.add(source_key)
                         title = re.sub(r'^(Amazon\.com|Walmart\.com|Target|Home Depot|Costco)\s*[:\-–]\s*', '', title).strip()
                         title = re.sub(r'\s*[:\-–|]\s*(Amazon\.com|Walmart|Target|Home Depot|Costco|Best Buy|eBay)\s*$', '', title).strip()
                         print(f'  SearXNG ({instance}) found: {clean_url} — "{title}"')
-                        return clean_url, title, source
-                # Had results but none were product pages
-                print(f'  SearXNG ({instance}) {len(results)} results but no product pages for: {query}')
-                # DON'T break — try another instance, results vary between instances
+                        all_found.append((clean_url, title, source))
+                if not all_found:
+                    print(f'  SearXNG ({instance}) {len(results)} results but no product pages for: {query}')
             else:
                 print(f'  SearXNG ({instance}) HTTP {resp.status_code}')
                 _searxng_dead_instances[instance] = time.time()
@@ -441,13 +476,16 @@ def _search_searxng(query, categories='general', max_instances=3):
             _searxng_dead_instances[instance] = time.time()
             continue
 
-    return None, None, None
+    if all_found:
+        return all_found if collect_all else _pick_best_product_url(all_found)
+    return [] if collect_all else (None, None, None)
 
 
-def _search_duckduckgo(query):
+def _search_duckduckgo(query, collect_all=False):
     """Search DuckDuckGo's HTML-only endpoint (works reliably from datacenter IPs).
     DDG's lite/HTML version is specifically designed for non-JS clients.
-    Returns (url, title, source) or (None, None, None)."""
+    If collect_all=True, returns list of ALL (url, title, source) tuples found.
+    Otherwise returns single best (url, title, source) or (None, None, None)."""
     try:
         resp = requests.get(
             'https://html.duckduckgo.com/html/',
@@ -457,9 +495,11 @@ def _search_duckduckgo(query):
         )
         if resp.status_code != 200:
             print(f'  DDG HTML search: HTTP {resp.status_code}')
-            return None, None, None
+            return [] if collect_all else (None, None, None)
 
         soup = BeautifulSoup(resp.text, 'html.parser')
+        found = []
+        seen_sources = set()
         # DDG HTML results are in <a class="result__a"> tags
         for link in soup.find_all('a', class_='result__a'):
             href = link.get('href', '')
@@ -476,22 +516,32 @@ def _search_duckduckgo(query):
                 continue
             clean_url, source = _is_product_page_url(href)
             if clean_url and source:
+                # Deduplicate by retailer — only keep first link per retailer
+                source_key = source.lower()
+                if source_key in seen_sources:
+                    continue
+                seen_sources.add(source_key)
                 title = link.get_text(strip=True) or ''
                 title = re.sub(r'^(Amazon\.com|Walmart\.com|Target|Home Depot|Costco)\s*[:\-–]\s*', '', title).strip()
                 title = re.sub(r'\s*[:\-–|]\s*(Amazon\.com|Walmart|Target|Home Depot|Costco|Best Buy|eBay)\s*$', '', title).strip()
                 print(f'  DDG HTML search found: {clean_url} — "{title[:60]}"')
-                return clean_url, title, source
+                found.append((clean_url, title, source))
+                if not collect_all:
+                    return _pick_best_product_url(found) if found else (None, None, None)
 
+        if found:
+            return found if collect_all else _pick_best_product_url(found)
         print(f'  DDG HTML search: no product pages found for: {query}')
     except Exception as e:
         print(f'  DDG HTML search error: {e}')
-    return None, None, None
+    return [] if collect_all else (None, None, None)
 
 
-def _search_google(query):
+def _search_google(query, collect_all=False):
     """Search Google via HTML scraping. May be blocked from some datacenter IPs
     but works often enough to be a useful fallback.
-    Returns (url, title, source) or (None, None, None)."""
+    If collect_all=True, returns list of ALL (url, title, source) tuples found.
+    Otherwise returns single best (url, title, source) or (None, None, None)."""
     try:
         resp = requests.get(
             'https://www.google.com/search',
@@ -501,13 +551,13 @@ def _search_google(query):
         )
         if resp.status_code != 200:
             print(f'  Google search: HTTP {resp.status_code}')
-            return None, None, None
+            return [] if collect_all else (None, None, None)
 
         soup = BeautifulSoup(resp.text, 'html.parser')
-        # Google wraps results in <a> tags with href starting with /url?q=
+        found = []
+        seen_sources = set()
         for a in soup.find_all('a', href=True):
             href = a['href']
-            # Extract actual URL from Google's redirect wrapper
             if href.startswith('/url?'):
                 try:
                     parsed = urllib.parse.urlparse(href)
@@ -520,21 +570,28 @@ def _search_google(query):
                 continue
             clean_url, source = _is_product_page_url(href)
             if clean_url and source:
+                source_key = source.lower()
+                if source_key in seen_sources:
+                    continue
+                seen_sources.add(source_key)
                 title = a.get_text(strip=True) or ''
                 title = re.sub(r'^(Amazon\.com|Walmart\.com|Target|Home Depot|Costco)\s*[:\-–]\s*', '', title).strip()
                 title = re.sub(r'\s*[:\-–|]\s*(Amazon\.com|Walmart|Target|Home Depot|Costco|Best Buy|eBay)\s*$', '', title).strip()
                 print(f'  Google search found: {clean_url} — "{title[:60]}"')
-                return clean_url, title, source
+                found.append((clean_url, title, source))
 
+        if found:
+            return found if collect_all else _pick_best_product_url(found)
         print(f'  Google search: no product pages found for: {query}')
     except Exception as e:
         print(f'  Google search error: {e}')
-    return None, None, None
+    return [] if collect_all else (None, None, None)
 
 
-def _search_bing(query):
+def _search_bing(query, collect_all=False):
     """Search Bing via HTML scraping. Often works from datacenter IPs.
-    Returns (url, title, source) or (None, None, None)."""
+    If collect_all=True, returns list of ALL (url, title, source) tuples found.
+    Otherwise returns single best (url, title, source) or (None, None, None)."""
     try:
         resp = requests.get(
             'https://www.bing.com/search',
@@ -544,81 +601,122 @@ def _search_bing(query):
         )
         if resp.status_code != 200:
             print(f'  Bing search: HTTP {resp.status_code}')
-            return None, None, None
+            return [] if collect_all else (None, None, None)
 
         soup = BeautifulSoup(resp.text, 'html.parser')
+        found = []
+        seen_sources = set()
         for a in soup.find_all('a', href=True):
             href = a['href']
             if not href.startswith('http'):
                 continue
             clean_url, source = _is_product_page_url(href)
             if clean_url and source:
+                source_key = source.lower()
+                if source_key in seen_sources:
+                    continue
+                seen_sources.add(source_key)
                 title = a.get_text(strip=True) or ''
                 title = re.sub(r'^(Amazon\.com|Walmart\.com|Target|Home Depot|Costco)\s*[:\-–]\s*', '', title).strip()
                 title = re.sub(r'\s*[:\-–|]\s*(Amazon\.com|Walmart|Target|Home Depot|Costco|Best Buy|eBay)\s*$', '', title).strip()
                 print(f'  Bing search found: {clean_url} — "{title[:60]}"')
-                return clean_url, title, source
+                found.append((clean_url, title, source))
 
+        if found:
+            return found if collect_all else _pick_best_product_url(found)
         print(f'  Bing search: no product pages found for: {query}')
     except Exception as e:
         print(f'  Bing search error: {e}')
-    return None, None, None
+    return [] if collect_all else (None, None, None)
 
 
 def _aggressive_upc_search(upc_clean, max_total_instances=6):
-    """v4.3: Aggressively search for a UPC across MULTIPLE search engines.
-    Tries SearXNG, DuckDuckGo HTML, Google, and Bing for maximum reliability.
+    """v4.4: Aggressively search for a UPC across MULTIPLE search engines.
+    Collects ALL product URLs found across all strategies, then picks the best
+    one based on retailer priority (Home Depot > Walmart > Target > Amazon).
     Returns (url, title, source) or (None, None, None)."""
 
     print(f"[{ENRICHMENT_VERSION}] Aggressive UPC search for: {upc_clean}")
 
-    # Strategy 1: SearXNG bare UPC (fast, no rate limits)
-    url, title, source = _search_searxng(upc_clean, max_instances=3)
-    if url:
-        print(f"  Strategy 1 (SearXNG bare UPC) found: {url}")
-        return url, title, source
+    all_candidates = []
+    seen_urls = set()
 
-    # Strategy 2: DuckDuckGo HTML (reliable from datacenter IPs, designed for non-JS)
-    url, title, source = _search_duckduckgo(upc_clean)
-    if url:
-        print(f"  Strategy 2 (DDG bare UPC) found: {url}")
-        return url, title, source
+    def _add_candidates(results):
+        """Add results (list of tuples) to candidates, deduplicating by URL."""
+        if not results:
+            return
+        if isinstance(results, tuple) and len(results) == 3:
+            results = [results]  # single result → list
+        for r in results:
+            if r and r[0] and r[0] not in seen_urls:
+                seen_urls.add(r[0])
+                all_candidates.append(r)
 
-    # Strategy 3: SearXNG UPC + "buy" (biases toward shopping results)
-    url, title, source = _search_searxng(f'{upc_clean} buy', max_instances=2)
-    if url:
-        print(f"  Strategy 3 (SearXNG UPC+buy) found: {url}")
-        return url, title, source
+    # Strategy 1: DuckDuckGo HTML — collect ALL product URLs
+    # DDG is most reliable from datacenter IPs and returns multiple results
+    ddg_results = _search_duckduckgo(upc_clean, collect_all=True)
+    _add_candidates(ddg_results)
+    if ddg_results:
+        print(f"  Strategy 1 (DDG bare UPC): {len(ddg_results)} product pages found")
 
-    # Strategy 4: DuckDuckGo UPC + "site:amazon.com OR site:homedepot.com"
-    url, title, source = _search_duckduckgo(f'{upc_clean} site:amazon.com OR site:homedepot.com OR site:walmart.com')
-    if url:
-        print(f"  Strategy 4 (DDG UPC+retailers) found: {url}")
-        return url, title, source
+    # Strategy 2: SearXNG bare UPC — collect ALL product URLs
+    searx_results = _search_searxng(upc_clean, max_instances=3, collect_all=True)
+    _add_candidates(searx_results)
+    if searx_results:
+        print(f"  Strategy 2 (SearXNG bare UPC): {len(searx_results)} product pages found")
 
-    # Strategy 5: Google search (may work even when SearXNG/DDG fail)
-    url, title, source = _search_google(upc_clean)
-    if url:
-        print(f"  Strategy 5 (Google bare UPC) found: {url}")
-        return url, title, source
+    # Strategy 3: Google search — collect ALL product URLs
+    google_results = _search_google(upc_clean, collect_all=True)
+    _add_candidates(google_results)
+    if google_results:
+        print(f"  Strategy 3 (Google bare UPC): {len(google_results)} product pages found")
 
-    # Strategy 6: Bing search
-    url, title, source = _search_bing(upc_clean)
-    if url:
-        print(f"  Strategy 6 (Bing bare UPC) found: {url}")
-        return url, title, source
+    # Strategy 4: Bing search — collect ALL product URLs
+    bing_results = _search_bing(upc_clean, collect_all=True)
+    _add_candidates(bing_results)
+    if bing_results:
+        print(f"  Strategy 4 (Bing bare UPC): {len(bing_results)} product pages found")
 
-    # Strategy 7: SearXNG quoted UPC for exact match
-    url, title, source = _search_searxng(f'"{upc_clean}"', max_instances=2)
-    if url:
-        print(f"  Strategy 7 (SearXNG quoted UPC) found: {url}")
-        return url, title, source
+    # If we have candidates, check if we have a Home Depot or non-Amazon link.
+    # If ALL we found is Amazon, try retailer-specific searches.
+    has_non_amazon = any(c[2] and 'amazon' not in c[2].lower() for c in all_candidates)
 
-    # Strategy 8: Google UPC + retailer scoping
-    url, title, source = _search_google(f'{upc_clean} amazon OR "home depot" OR walmart')
-    if url:
-        print(f"  Strategy 8 (Google UPC+retailers) found: {url}")
-        return url, title, source
+    if all_candidates and not has_non_amazon:
+        print(f"  Only Amazon found so far — trying retailer-specific searches")
+        # Try DDG with Home Depot scoping
+        hd_results = _search_duckduckgo(f'{upc_clean} site:homedepot.com', collect_all=True)
+        _add_candidates(hd_results)
+        # Try DDG with Walmart scoping
+        wm_results = _search_duckduckgo(f'{upc_clean} site:walmart.com', collect_all=True)
+        _add_candidates(wm_results)
+        # Try Google with retailer scoping
+        g_results = _search_google(f'{upc_clean} "home depot" OR walmart OR target', collect_all=True)
+        _add_candidates(g_results)
+
+    if not all_candidates:
+        # Nothing found yet — try alternative query formats
+        print(f"  No results yet — trying alternative UPC query formats")
+
+        # UPC + "buy" via SearXNG
+        r = _search_searxng(f'{upc_clean} buy', max_instances=2, collect_all=True)
+        _add_candidates(r)
+
+        # Quoted UPC via SearXNG
+        r = _search_searxng(f'"{upc_clean}"', max_instances=2, collect_all=True)
+        _add_candidates(r)
+
+        # DDG retailer-scoped
+        r = _search_duckduckgo(f'{upc_clean} site:amazon.com OR site:homedepot.com OR site:walmart.com', collect_all=True)
+        _add_candidates(r)
+
+        # Google retailer-scoped
+        r = _search_google(f'{upc_clean} amazon OR "home depot" OR walmart', collect_all=True)
+        _add_candidates(r)
+
+    if all_candidates:
+        best = _pick_best_product_url(all_candidates)
+        print(f"  Aggressive UPC search RESULT: {best[2]} — {best[0][:60]} (from {len(all_candidates)} total candidates)")
+        return best
 
     print(f"  Aggressive UPC search: no product pages found for {upc_clean}")
     return None, None, None
@@ -1590,15 +1688,14 @@ def _enrich_single_item(i, items):
     if info['upc_matched'] and info['title'] and original_name:
         sim = _name_similarity(original_name, info['title'])
         min_sim = _get_min_sim(original_name)
+        # v4.4: UPC is a UNIQUE barcode — if UPC matched, ALWAYS use the enriched
+        # title. Retailers often use different/better product names than what's in
+        # the spreadsheet. The user explicitly wants titles updated from enrichment.
+        lookup_is_relevant = True
         if sim >= min_sim:
-            lookup_is_relevant = True
             print(f'[{ENRICHMENT_VERSION}] UPC MATCH validated (sim={sim:.2f} >= {min_sim}): "{original_name}" → "{info["title"]}" (source: {info["source"]})')
         else:
-            # UPC matched but title doesn't match — use link/image but keep original name
-            lookup_is_relevant = True
-            upc_title_was = info['title']
-            info['title'] = None  # Don't override the name
-            print(f'[{ENRICHMENT_VERSION}] UPC MATCH but title mismatch (sim={sim:.2f} < {min_sim}): keeping original name "{original_name}" (UPC title was: "{upc_title_was}")')
+            print(f'[{ENRICHMENT_VERSION}] UPC MATCH (sim={sim:.2f} < {min_sim}): updating title anyway — "{original_name}" → "{info["title"]}" (source: {info["source"]})')
     elif info['upc_matched'] and not original_name:
         lookup_is_relevant = True
         if info['title']:
