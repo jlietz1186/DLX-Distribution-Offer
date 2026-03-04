@@ -11,6 +11,12 @@ from werkzeug.utils import secure_filename
 
 app = Flask(__name__)
 app.secret_key = os.environ.get('SECRET_KEY', 'dlx-offer-tool-dev-key-change-in-prod')
+
+# ── Enrichment version tag — printed in logs so we can verify correct deployment ──
+ENRICHMENT_VERSION = 'v4.0-2026-03-04'
+print(f'╔══════════════════════════════════════════════════════════╗')
+print(f'║  DLX Offer Formatter — Enrichment Engine {ENRICHMENT_VERSION}  ║')
+print(f'╚══════════════════════════════════════════════════════════╝')
 app.config['MAX_CONTENT_LENGTH'] = 50 * 1024 * 1024  # 50MB max
 
 UPLOAD_FOLDER = tempfile.mkdtemp()
@@ -358,14 +364,20 @@ SEARXNG_INSTANCES = [
     'https://search.mdosch.de',
     'https://searx.namejeff.xyz',
     'https://etsi.me',
+    'https://searx.space',
+    'https://priv.au',
+    'https://opnxng.com',
+    'https://search.inetol.net',
+    'https://searx.techsaviours.org',
+    'https://s.zhaocloud.net',
 ]
 
 
 _searxng_dead_instances = {}  # Track instances that keep failing
 
-def _search_searxng(query, categories='general', max_instances=2):
+def _search_searxng(query, categories='general', max_instances=3):
     """Search using SearXNG public instances (JSON API).
-    Tries up to max_instances for speed (default 2).
+    Tries up to max_instances for speed (default 3).
     Skips instances that have failed recently.
     Returns (url, title, source) or (None, None, None)."""
     import random
@@ -393,7 +405,7 @@ def _search_searxng(query, categories='general', max_instances=2):
                     'language': 'en',
                 },
                 headers=BROWSER_HEADERS,
-                timeout=6  # Short timeout — fail fast, try next
+                timeout=8  # Slightly longer timeout for reliability
             )
             if resp.status_code == 200:
                 data = resp.json()
@@ -408,31 +420,60 @@ def _search_searxng(query, categories='general', max_instances=2):
                         # Clean up title
                         title = re.sub(r'^(Amazon\.com|Walmart\.com|Target|Home Depot|Costco)\s*[:\-–]\s*', '', title).strip()
                         title = re.sub(r'\s*[:\-–|]\s*(Amazon\.com|Walmart|Target|Home Depot|Costco|Best Buy|eBay)\s*$', '', title).strip()
-                        print(f'SearXNG ({instance}) found: {clean_url} — "{title}"')
+                        print(f'  SearXNG ({instance}) found: {clean_url} — "{title}"')
                         return clean_url, title, source
-                # Had results but none were product pages — don't try more instances,
-                # the query itself probably won't match on other instances either
-                print(f'SearXNG ({instance}) returned {len(results)} results but no product pages for: {query}')
-                break
+                # Had results but none were product pages
+                print(f'  SearXNG ({instance}) {len(results)} results but no product pages for: {query}')
+                # DON'T break — try another instance, results vary between instances
             else:
-                print(f'SearXNG ({instance}) returned status {resp.status_code}')
+                print(f'  SearXNG ({instance}) HTTP {resp.status_code}')
                 _searxng_dead_instances[instance] = time.time()
         except Exception as e:
-            print(f'SearXNG ({instance}) error: {e}')
+            print(f'  SearXNG ({instance}) error: {e}')
             _searxng_dead_instances[instance] = time.time()
             continue
 
     return None, None, None
 
 
+def _aggressive_upc_search(upc_clean, max_total_instances=6):
+    """Aggressively search for a UPC across SearXNG with MULTIPLE query strategies.
+    This is the primary method for finding product links when UPCitemdb fails.
+    Tries different query formats to maximize chances of finding a product page.
+    Returns (url, title, source) or (None, None, None)."""
+
+    print(f"[{ENRICHMENT_VERSION}] Aggressive UPC search for: {upc_clean}")
+
+    # Strategy 1: Bare UPC (many product pages include UPC in metadata)
+    url, title, source = _search_searxng(upc_clean, max_instances=3)
+    if url:
+        print(f"  Strategy 1 (bare UPC) found: {url}")
+        return url, title, source
+
+    # Strategy 2: UPC + "buy" to bias toward shopping results
+    url, title, source = _search_searxng(f'{upc_clean} buy', max_instances=2)
+    if url:
+        print(f"  Strategy 2 (UPC+buy) found: {url}")
+        return url, title, source
+
+    # Strategy 3: Quoted UPC for exact match
+    url, title, source = _search_searxng(f'"{upc_clean}"', max_instances=2)
+    if url:
+        print(f"  Strategy 3 (quoted UPC) found: {url}")
+        return url, title, source
+
+    print(f"  Aggressive UPC search: no product pages found for {upc_clean}")
+    return None, None, None
+
+
 def _search_retailer_directly(upc, name=None):
     """Search major retailer websites directly by UPC/name.
-    CRITICAL LOGIC:
-    - When searching by UPC: ONLY accept if the retailer REDIRECTS to a product page.
-      If still on search results page, no exact UPC match exists → return nothing.
-      This prevents returning random "suggested" products that Amazon/Walmart show.
-    - When searching by NAME: scrape product links from search results (with similarity
-      validation done later by the caller).
+    v4.0 CRITICAL LOGIC:
+    - UPC search: ONLY accept if the retailer REDIRECTS to a product page.
+      Retailer search results pages are JS-rendered and can't be scraped server-side.
+      This is the ONLY reliable signal from direct retailer search.
+    - NAME search: Try to scrape product links from results (lower reliability
+      from datacenter IPs — most retailers block or serve JS-only pages).
     Returns (url, title, source) or (None, None, None)."""
 
     upc_clean = re.sub(r'[^0-9]', '', str(upc)) if upc else ''
@@ -440,6 +481,8 @@ def _search_retailer_directly(upc, name=None):
     search_term = upc_clean if searching_by_upc else str(name or '').strip()
     if not search_term:
         return None, None, None
+
+    print(f"[{ENRICHMENT_VERSION}] _search_retailer_directly: term='{search_term}', by_upc={searching_by_upc}")
 
     # Retailer search URLs — these are the internal search pages
     retailer_searches = [
@@ -479,53 +522,29 @@ def _search_retailer_directly(upc, name=None):
                 allow_redirects=True
             )
             if resp.status_code != 200:
-                print(f"Direct {retailer['name']} search returned {resp.status_code}")
+                print(f"  [{retailer['name']}] HTTP {resp.status_code} — skipping")
                 continue
 
-            # Check if we were redirected directly to a product page
-            # This is the ONLY way to accept UPC search results — a redirect means
-            # the retailer found an exact match for this barcode.
+            # Check if we were redirected directly to a product page.
+            # This is the ONLY reliable way to match UPCs via retailer sites from a server.
             final_url = resp.url
             clean_url, source = _is_product_page_url(final_url)
             if clean_url:
-                print(f"Direct {retailer['name']} search redirected to product: {clean_url}")
+                print(f"  [{retailer['name']}] REDIRECT to product page: {clean_url}")
                 return clean_url, None, source
 
-            # ── UPC SEARCH: Check results carefully ──
+            # ── UPC SEARCH: Redirect was the only chance. Skip HTML parsing. ──
+            # Amazon/Walmart/Target search results are JS-rendered — raw HTML from
+            # requests has NO product links. Don't waste time parsing.
             if searching_by_upc:
-                page_text = resp.text
-                # Check if this is a "no results" page — if so, skip entirely
-                _no_result_indicators = [r'No results', r'0 results', r'did not match',
-                                         r"couldn't find", r'try a new search',
-                                         r'did not return any results', r'no products found']
-                _is_empty = any(re.search(p, page_text, re.IGNORECASE) for p in _no_result_indicators)
-                if _is_empty:
-                    print(f"Direct {retailer['name']} UPC search: NO RESULTS page for '{search_term}' — skipping")
-                    continue
-                # Page HAS results (retailer found something for this UPC but didn't redirect).
-                # Accept ONLY the very first product link — it's the best match.
-                soup = BeautifulSoup(page_text, 'html.parser')
-                for a in soup.find_all('a', href=True):
-                    href = a['href']
-                    if href.startswith('/'):
-                        parsed_url = urllib.parse.urlparse(retailer['url'])
-                        href = f'{parsed_url.scheme}://{parsed_url.netloc}{href}'
-                    if re.search(retailer['product_pattern'], href):
-                        first_url, first_source = _is_product_page_url(href)
-                        if first_url:
-                            print(f"Direct {retailer['name']} UPC search found first product: {first_url}")
-                            return first_url, None, first_source
-                print(f"Direct {retailer['name']} UPC search: no product links in results — skipping")
+                print(f"  [{retailer['name']}] UPC search: no redirect — skipping (JS-rendered pages can't be scraped)")
                 continue
 
-            # ── NAME SEARCH: Scrape product links from results ──
-            # For name-based searches, it's OK to scrape links because the caller
-            # will validate them with similarity checking.
+            # ── NAME SEARCH: Try scraping links (works sometimes) ──
             page_text = resp.text
             soup = BeautifulSoup(page_text, 'html.parser')
-            product_links = []
-
             seen_urls = set()
+
             for a in soup.find_all('a', href=True):
                 href = a['href']
                 if href.startswith('/'):
@@ -534,17 +553,12 @@ def _search_retailer_directly(upc, name=None):
                 if re.search(retailer['product_pattern'], href):
                     clean_url, source = _is_product_page_url(href)
                     if clean_url and clean_url not in seen_urls:
-                        seen_urls.add(clean_url)
-                        product_links.append((clean_url, source))
+                        print(f"  [{retailer['name']}] Name search found product: {clean_url}")
+                        return clean_url, None, source
 
-            if product_links:
-                url, source = product_links[0]
-                print(f"Direct {retailer['name']} name search found product: {url}")
-                return url, None, source
-
-            print(f"Direct {retailer['name']} name search: no product links found in results")
+            print(f"  [{retailer['name']}] Name search: no product links found")
         except Exception as e:
-            print(f"Direct {retailer['name']} search error: {e}")
+            print(f"  [{retailer['name']}] Error: {e}")
             continue
 
     return None, None, None
@@ -686,9 +700,10 @@ def _name_similarity(name1, name2):
 
 
 def search_product_on_web(upc=None, name=None):
-    """Search for a product on major retail sites. Priority order:
-    1. Direct retailer search (fastest, most reliable from datacenter IPs)
-    2. SearXNG meta-search (fallback only — many instances block datacenter IPs)
+    """v4.0: Search for a product on major retail sites. Priority order:
+    1. Direct retailer UPC search (redirect-only — most retailers block from datacenter)
+    2. Aggressive SearXNG UPC search (multiple query strategies, many instances)
+    3. Name-based search ONLY when no UPC available
     ONLY returns results that are actual product pages.
     Returns dict with keys: url, title, source."""
     result = {'url': None, 'title': None, 'source': None}
@@ -696,21 +711,23 @@ def search_product_on_web(upc=None, name=None):
     upc_clean = re.sub(r'[^0-9]', '', str(upc)) if upc else ''
     has_upc = bool(upc_clean) and upc_clean not in ('0', '')
 
+    print(f"[{ENRICHMENT_VERSION}] search_product_on_web: upc={upc_clean}, name='{(name or '')[:50]}', has_upc={has_upc}")
+
     def _validate_and_return(url, source, original_name, searched_by_upc=False):
         """Fetch page title and validate the result is the correct product.
-        Two checks:
-        1. If we can't fetch a page title, reject (can't verify)
-        2. Name similarity must pass threshold (higher for short names)
+        v4.0 uses HIGHER thresholds to prevent false matches:
+        - Short names (≤3 meaningful words): 0.65
+        - Long names (>3 meaningful words): 0.50
         Returns result dict or None."""
         try:
             # Fetch the actual product page
             resp = requests.get(url, headers=BROWSER_HEADERS, timeout=6, allow_redirects=True)
             if resp.status_code != 200:
-                print(f'Page fetch failed ({resp.status_code}) for {url[:60]}')
+                print(f'  Validate: page fetch failed ({resp.status_code}) for {url[:60]}')
                 return None
             page_text = resp.text
         except Exception as e:
-            print(f'Page fetch error for {url[:60]}: {e}')
+            print(f'  Validate: page fetch error for {url[:60]}: {e}')
             return None
 
         # Extract page title
@@ -747,85 +764,110 @@ def search_product_on_web(upc=None, name=None):
         except Exception:
             pass
 
-        # CHECK 1: If we can't get a title, reject — we can't verify this is right
+        # CHECK 1: If we can't get a title, still accept if searched by UPC
+        # (UPC search results are trustworthy even without title verification)
         if not page_title:
-            print(f'Could not extract title from {url[:60]} — rejecting')
+            if searched_by_upc:
+                print(f'  Validate: no title extracted but UPC-based search — accepting {url[:60]}')
+                return {'url': url, 'title': None, 'source': source}
+            print(f'  Validate: no title from {url[:60]} — rejecting')
             return None
 
-        # CHECK 2: Name similarity — require higher threshold for short names
+        # CHECK 2: Name similarity — v4.0 STRICTER thresholds
         if original_name:
             sim = _name_similarity(original_name, page_title)
-            # Short names (1-3 meaningful words) need higher threshold because
-            # a single shared category word (e.g., "light") can cause false matches
             clean_words = set(re.sub(r'[^a-z0-9\s]', '', original_name.lower()).split())
             stop = {'the', 'a', 'an', 'and', 'or', 'of', 'for', 'in', 'with', 'to', 'by',
                     'is', 'at', 'on', 'from', 'pack', 'ct', 'oz', 'lb', 'count', 'ea',
                     'each', 'per', 'size', 'new', 'free', 'buy', 'best', 'top', 'item'}
             meaningful_words = clean_words - stop
-            min_sim = 0.55 if len(meaningful_words) <= 3 else 0.35
+            # v4.0: MUCH stricter thresholds to prevent false matches
+            # Old: 0.55 short / 0.35 long → New: 0.65 short / 0.50 long
+            min_sim = 0.65 if len(meaningful_words) <= 3 else 0.50
 
             if sim < min_sim:
-                print(f'Result rejected (sim={sim:.2f} < {min_sim}): "{page_title[:60]}" vs "{original_name[:60]}"')
+                print(f'  Validate: REJECTED (sim={sim:.2f} < {min_sim}): "{page_title[:60]}" vs "{original_name[:60]}"')
                 return None
-            print(f'Result accepted (sim={sim:.2f} >= {min_sim}): "{page_title[:60]}" for "{original_name[:60]}"')
+            print(f'  Validate: ACCEPTED (sim={sim:.2f} >= {min_sim}): "{page_title[:60]}" for "{original_name[:60]}"')
 
         return {'url': url, 'title': page_title, 'source': source}
 
-    # ── Strategy 1: Direct retailer search (FAST — goes straight to retailer sites) ──
-    # Search by UPC first, then by name
+    # ══════════════════════════════════════════════════════════════════════
+    # STRATEGY 1: Direct retailer UPC search (redirect-only)
+    # Only works when a retailer recognizes the UPC and redirects.
+    # From datacenter IPs: Home Depot 403, Amazon/Walmart no redirect, etc.
+    # Low success rate but very fast when it works.
+    # ══════════════════════════════════════════════════════════════════════
     if has_upc:
         try:
             direct_url, _, direct_source = _search_retailer_directly(upc, None)
             if direct_url:
                 r = _validate_and_return(direct_url, direct_source, name, searched_by_upc=True)
                 if r:
-                    print(f'Direct UPC retailer search hit: {direct_url}')
+                    print(f'  FOUND via direct retailer UPC redirect: {direct_url}')
                     return r
         except Exception as e:
-            print(f'Direct UPC retailer search failed: {e}')
+            print(f'  Direct UPC retailer search failed: {e}')
 
-    # Direct search by product name — ONLY when NO UPC is available.
-    # When we have a UPC, name-based retailer search produces too many false positives
-    # (random products with vaguely similar names). Skip it.
+    # ══════════════════════════════════════════════════════════════════════
+    # STRATEGY 2: Aggressive SearXNG UPC search (MAIN WORKHORSE)
+    # Tries multiple query formats across many SearXNG instances.
+    # SearXNG aggregates Google/Bing/DDG results via JSON API — works from
+    # datacenter IPs unlike direct retailer scraping.
+    # ══════════════════════════════════════════════════════════════════════
+    if has_upc:
+        try:
+            url, snippet_title, source = _aggressive_upc_search(upc_clean)
+            if url:
+                r = _validate_and_return(url, source, name, searched_by_upc=True)
+                if r:
+                    # Use SearXNG snippet title if validation didn't extract one
+                    if not r.get('title') and snippet_title:
+                        r['title'] = snippet_title
+                    print(f'  FOUND via SearXNG UPC search: {url}')
+                    return r
+        except Exception as e:
+            print(f'  SearXNG UPC search failed: {e}')
+
+    # ══════════════════════════════════════════════════════════════════════
+    # STRATEGY 3: Name-based search — ONLY when NO UPC is available.
+    # When we have a UPC, name-based search produces too many false positives
+    # (random products with vaguely similar names). NEVER use with UPC.
+    # ══════════════════════════════════════════════════════════════════════
     if name and not has_upc:
+        print(f'  No UPC available — trying name-based search for: {name[:50]}')
+        # 3a: Direct retailer name search
         try:
             direct_url, _, direct_source = _search_retailer_directly(None, name)
             if direct_url:
                 r = _validate_and_return(direct_url, direct_source, name, searched_by_upc=False)
                 if r:
-                    print(f'Direct name retailer search hit: {direct_url}')
+                    print(f'  FOUND via retailer name search: {direct_url}')
                     return r
         except Exception as e:
-            print(f'Direct name retailer search failed: {e}')
+            print(f'  Retailer name search failed: {e}')
 
-    # ── Strategy 2: SearXNG meta-search (SLOW fallback — most instances fail from datacenter) ──
-    if has_upc:
-        try:
-            url, snippet_title, source = _search_searxng(f'{upc_clean}', max_instances=2)
-            if url:
-                r = _validate_and_return(url, source, name, searched_by_upc=True)
-                if r:
-                    return r
-        except Exception:
-            pass
-
-    # SearXNG name search — ONLY when NO UPC available (same false-positive issue)
-    if name and not has_upc:
+        # 3b: SearXNG name search
         try:
             clean_name = str(name).strip()
-            url, snippet_title, source = _search_searxng(f'{clean_name} buy', max_instances=2)
+            url, snippet_title, source = _search_searxng(f'{clean_name} buy', max_instances=3)
             if url:
                 r = _validate_and_return(url, source, name, searched_by_upc=False)
                 if r:
+                    print(f'  FOUND via SearXNG name search: {url}')
                     return r
         except Exception:
             pass
 
+    if has_upc:
+        print(f'  search_product_on_web: NO results found for UPC {upc_clean}')
+    else:
+        print(f'  search_product_on_web: NO results found for name "{(name or "")[:50]}"')
     return result
 
 
 def lookup_product_info(upc=None, name=None):
-    """Unified product lookup: returns dict with title, image, retail_link, source, upc_matched.
+    """v4.0: Unified product lookup: returns dict with title, image, retail_link, source, upc_matched.
     upc_matched=True means the result came from a direct UPC barcode lookup (trusted).
     upc_matched=False means it came from a web search (needs validation)."""
     result = {'title': None, 'image': None, 'retail_link': None, 'source': None, 'upc_matched': False}
@@ -833,10 +875,12 @@ def lookup_product_info(upc=None, name=None):
     upc_clean = re.sub(r'[^0-9]', '', str(upc)) if upc else ''
     has_upc = bool(upc_clean) and upc_clean.lower() not in ('na', 'nan', 'none', '0')
 
+    print(f'[{ENRICHMENT_VERSION}] lookup_product_info: upc={upc_clean}, name="{(name or "")[:50]}"')
+
     # Check cache first
     cache_key = f'{upc_clean}|{name or ""}'
     if cache_key in _lookup_cache:
-        print(f'Cache hit for: {cache_key}')
+        print(f'  Cache hit for: {cache_key}')
         return _lookup_cache[cache_key].copy()
 
     # ── 1. UPCitemdb (best source — returns title, images, and offers in one call) ──
@@ -1298,18 +1342,22 @@ def debug_lookup():
 
 
 def _enrich_single_item(i, items):
-    """Enrich a single item — designed to run in a thread pool."""
+    """v4.0: Enrich a single item — designed to run in a thread pool."""
     if i >= len(items):
         return None
     item = items[i].copy()
     upc = item.get('UPC/Item #', '')
     original_name = item.get('Item Name', '').strip()
 
+    print(f'\n[{ENRICHMENT_VERSION}] ── Enriching item {i+1}: UPC={upc}, Name="{original_name[:60]}" ──')
+
     # Check what's missing
     img_val = item.get('Image', '')
     needs_image = not img_val or (not img_val.startswith('http') and not img_val.startswith('/serve_image/'))
     link_val = item.get('Retail Link', '')
     needs_link = not link_val or not link_val.startswith('http')
+
+    print(f'  needs_image={needs_image}, needs_link={needs_link}')
 
     # Look up product info
     info = lookup_product_info(upc=upc, name=original_name)
@@ -1319,43 +1367,40 @@ def _enrich_single_item(i, items):
     # UPC databases can have wrong/outdated entries, or the UPC may map to a
     # different variant. If the title doesn't match, keep the original name
     # but still use the link/image if available.
+    # v4.0: Stricter similarity thresholds — 0.65 for short names, 0.50 for long
+    _STOP_WORDS = {'the', 'a', 'an', 'and', 'or', 'of', 'for', 'in', 'with', 'to', 'by',
+            'is', 'at', 'on', 'from', 'pack', 'ct', 'oz', 'lb', 'count', 'ea',
+            'each', 'per', 'size', 'new', 'free', 'buy', 'best', 'top', 'item'}
+    def _get_min_sim(orig_name):
+        clean_words = set(re.sub(r'[^a-z0-9\s]', '', orig_name.lower()).split())
+        meaningful = clean_words - _STOP_WORDS
+        return 0.65 if len(meaningful) <= 3 else 0.50
+
     if info['upc_matched'] and info['title'] and original_name:
         sim = _name_similarity(original_name, info['title'])
-        clean_words = set(re.sub(r'[^a-z0-9\s]', '', original_name.lower()).split())
-        _stop = {'the', 'a', 'an', 'and', 'or', 'of', 'for', 'in', 'with', 'to', 'by',
-                'is', 'at', 'on', 'from', 'pack', 'ct', 'oz', 'lb', 'count', 'ea',
-                'each', 'per', 'size', 'new', 'free', 'buy', 'best', 'top', 'item'}
-        meaningful_words = clean_words - _stop
-        min_sim = 0.55 if len(meaningful_words) <= 3 else 0.35
+        min_sim = _get_min_sim(original_name)
         if sim >= min_sim:
             lookup_is_relevant = True
-            print(f'Enrichment UPC MATCH validated (sim={sim:.2f} >= {min_sim}): "{original_name}" → "{info["title"]}" (source: {info["source"]})')
+            print(f'[{ENRICHMENT_VERSION}] UPC MATCH validated (sim={sim:.2f} >= {min_sim}): "{original_name}" → "{info["title"]}" (source: {info["source"]})')
         else:
             # UPC matched but title doesn't match — use link/image but keep original name
             lookup_is_relevant = True
             upc_title_was = info['title']
             info['title'] = None  # Don't override the name
-            print(f'Enrichment UPC MATCH but title mismatch (sim={sim:.2f} < {min_sim}): keeping original name "{original_name}" (UPC title was: "{upc_title_was}")')
+            print(f'[{ENRICHMENT_VERSION}] UPC MATCH but title mismatch (sim={sim:.2f} < {min_sim}): keeping original name "{original_name}" (UPC title was: "{upc_title_was}")')
     elif info['upc_matched'] and not original_name:
         lookup_is_relevant = True
         if info['title']:
-            print(f'Enrichment UPC MATCH (no original name): → "{info["title"]}" (source: {info["source"]})')
+            print(f'[{ENRICHMENT_VERSION}] UPC MATCH (no original name): → "{info["title"]}" (source: {info["source"]})')
     elif info['title'] and original_name:
         sim = _name_similarity(original_name, info['title'])
-        # Higher threshold for short names (1-3 meaningful words) since one
-        # shared category word can cause false matches
-        clean_words = set(re.sub(r'[^a-z0-9\s]', '', original_name.lower()).split())
-        _stop = {'the', 'a', 'an', 'and', 'or', 'of', 'for', 'in', 'with', 'to', 'by',
-                'is', 'at', 'on', 'from', 'pack', 'ct', 'oz', 'lb', 'count', 'ea',
-                'each', 'per', 'size', 'new', 'free', 'buy', 'best', 'top', 'item'}
-        meaningful_words = clean_words - _stop
-        min_sim = 0.55 if len(meaningful_words) <= 3 else 0.35
+        min_sim = _get_min_sim(original_name)
         if sim >= min_sim:
             lookup_is_relevant = True
-            print(f'Enrichment NAME MATCH (sim={sim:.2f} >= {min_sim}): "{original_name}" → "{info["title"]}"')
+            print(f'[{ENRICHMENT_VERSION}] NAME MATCH (sim={sim:.2f} >= {min_sim}): "{original_name}" → "{info["title"]}"')
         else:
             lookup_is_relevant = False
-            print(f'Enrichment REJECTED (sim={sim:.2f} < {min_sim}): "{original_name}" ≠ "{info["title"]}" — keeping original')
+            print(f'[{ENRICHMENT_VERSION}] REJECTED (sim={sim:.2f} < {min_sim}): "{original_name}" ≠ "{info["title"]}" — keeping original')
     elif info['title'] and not original_name:
         lookup_is_relevant = True
     else:
@@ -1406,13 +1451,17 @@ def _enrich_single_item(i, items):
 
 @app.route('/enrich', methods=['POST'])
 def enrich_data():
-    """Look up images, retail links, and product titles for items that need them.
+    """v4.0: Look up images, retail links, and product titles for items that need them.
     Uses thread pool for parallel lookups to dramatically speed up enrichment."""
     from concurrent.futures import ThreadPoolExecutor, as_completed
 
     data = request.json
     session_id = data.get('session_id')
     items = data.get('items', [])
+
+    print(f'\n{"="*70}')
+    print(f'[{ENRICHMENT_VERSION}] ENRICHMENT REQUEST: {len(items)} items')
+    print(f'{"="*70}')
     indices = data.get('indices', [])
 
     # Process items in parallel — 3 threads balances speed vs Render free tier resources
