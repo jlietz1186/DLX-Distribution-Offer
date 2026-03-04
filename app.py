@@ -13,7 +13,7 @@ app = Flask(__name__)
 app.secret_key = os.environ.get('SECRET_KEY', 'dlx-offer-tool-dev-key-change-in-prod')
 
 # ── Enrichment version tag — printed in logs so we can verify correct deployment ──
-ENRICHMENT_VERSION = 'v4.0-2026-03-04'
+ENRICHMENT_VERSION = 'v4.1-2026-03-04'
 print(f'╔══════════════════════════════════════════════════════════╗')
 print(f'║  DLX Offer Formatter — Enrichment Engine {ENRICHMENT_VERSION}  ║')
 print(f'╚══════════════════════════════════════════════════════════╝')
@@ -533,11 +533,33 @@ def _search_retailer_directly(upc, name=None):
                 print(f"  [{retailer['name']}] REDIRECT to product page: {clean_url}")
                 return clean_url, None, source
 
-            # ── UPC SEARCH: Redirect was the only chance. Skip HTML parsing. ──
-            # Amazon/Walmart/Target search results are JS-rendered — raw HTML from
-            # requests has NO product links. Don't waste time parsing.
+            # ── UPC SEARCH: No redirect. Try parsing HTML for product links. ──
+            # v4.1: Some retailers (especially Amazon) DO include product links in
+            # server-side HTML even without JS. The old version proved this works.
+            # Accept ONLY the first product link found — it's the UPC match.
             if searching_by_upc:
-                print(f"  [{retailer['name']}] UPC search: no redirect — skipping (JS-rendered pages can't be scraped)")
+                page_text = resp.text
+                # Quick check: is this a "no results" page?
+                _no_result_indicators = [r'No results', r'0 results', r'did not match',
+                                         r"couldn't find", r'try a new search',
+                                         r'did not return any results', r'no products found']
+                _is_empty = any(re.search(p, page_text, re.IGNORECASE) for p in _no_result_indicators)
+                if _is_empty:
+                    print(f"  [{retailer['name']}] UPC search: NO RESULTS page — skipping")
+                    continue
+                # Try to find product links in HTML
+                soup = BeautifulSoup(page_text, 'html.parser')
+                for a in soup.find_all('a', href=True):
+                    href = a['href']
+                    if href.startswith('/'):
+                        parsed_url = urllib.parse.urlparse(retailer['url'])
+                        href = f'{parsed_url.scheme}://{parsed_url.netloc}{href}'
+                    if re.search(retailer['product_pattern'], href):
+                        first_url, first_source = _is_product_page_url(href)
+                        if first_url:
+                            print(f"  [{retailer['name']}] UPC search found first product: {first_url}")
+                            return first_url, None, first_source
+                print(f"  [{retailer['name']}] UPC search: no product links in HTML — skipping")
                 continue
 
             # ── NAME SEARCH: Try scraping links (works sometimes) ──
@@ -773,22 +795,36 @@ def search_product_on_web(upc=None, name=None):
             print(f'  Validate: no title from {url[:60]} — rejecting')
             return None
 
-        # CHECK 2: Name similarity — v4.0 STRICTER thresholds
+        # CHECK 2: Name similarity
         if original_name:
             sim = _name_similarity(original_name, page_title)
-            clean_words = set(re.sub(r'[^a-z0-9\s]', '', original_name.lower()).split())
-            stop = {'the', 'a', 'an', 'and', 'or', 'of', 'for', 'in', 'with', 'to', 'by',
-                    'is', 'at', 'on', 'from', 'pack', 'ct', 'oz', 'lb', 'count', 'ea',
-                    'each', 'per', 'size', 'new', 'free', 'buy', 'best', 'top', 'item'}
-            meaningful_words = clean_words - stop
-            # v4.0: MUCH stricter thresholds to prevent false matches
-            # Old: 0.55 short / 0.35 long → New: 0.65 short / 0.50 long
-            min_sim = 0.65 if len(meaningful_words) <= 3 else 0.50
 
-            if sim < min_sim:
-                print(f'  Validate: REJECTED (sim={sim:.2f} < {min_sim}): "{page_title[:60]}" vs "{original_name[:60]}"')
-                return None
-            print(f'  Validate: ACCEPTED (sim={sim:.2f} >= {min_sim}): "{page_title[:60]}" for "{original_name[:60]}"')
+            if searched_by_upc:
+                # v4.1: UPC is a UNIQUE barcode identifier. If we searched by UPC and
+                # found a product page, the product IS correct even if the retailer uses
+                # a completely different name. Example: spreadsheet says "1,000 Lumens
+                # 3-sided CB Clip-on Light" but Amazon calls the same UPC "BLACK+DECKER
+                # Rechargeable LED Flashlight & 360° Lantern". Same product, different name.
+                # Accept with very low threshold (just basic sanity — reject only if
+                # it's a completely unrelated category like "dog food").
+                min_sim = 0.10
+                if sim < min_sim:
+                    print(f'  Validate: UPC search REJECTED (sim={sim:.2f} < {min_sim}): "{page_title[:60]}" vs "{original_name[:60]}"')
+                    return None
+                print(f'  Validate: UPC search ACCEPTED (sim={sim:.2f}, trust UPC): "{page_title[:60]}" for "{original_name[:60]}"')
+            else:
+                # NAME-BASED search: strict thresholds to prevent false matches
+                clean_words = set(re.sub(r'[^a-z0-9\s]', '', original_name.lower()).split())
+                stop = {'the', 'a', 'an', 'and', 'or', 'of', 'for', 'in', 'with', 'to', 'by',
+                        'is', 'at', 'on', 'from', 'pack', 'ct', 'oz', 'lb', 'count', 'ea',
+                        'each', 'per', 'size', 'new', 'free', 'buy', 'best', 'top', 'item'}
+                meaningful_words = clean_words - stop
+                min_sim = 0.65 if len(meaningful_words) <= 3 else 0.50
+
+                if sim < min_sim:
+                    print(f'  Validate: Name search REJECTED (sim={sim:.2f} < {min_sim}): "{page_title[:60]}" vs "{original_name[:60]}"')
+                    return None
+                print(f'  Validate: Name search ACCEPTED (sim={sim:.2f} >= {min_sim}): "{page_title[:60]}" for "{original_name[:60]}"')
 
         return {'url': url, 'title': page_title, 'source': source}
 
