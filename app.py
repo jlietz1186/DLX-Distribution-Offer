@@ -667,6 +667,33 @@ def _name_similarity(name1, name2):
     return len(overlap) / len(shorter)
 
 
+def _verify_upc_on_page(url, upc_clean, page_text=None):
+    """Check if a UPC number actually appears on a product page.
+    If the UPC doesn't appear, the page is probably a random/suggested product,
+    not a genuine match for this barcode. Returns True if verified."""
+    if not upc_clean or len(upc_clean) < 8:
+        return True  # Can't verify short/invalid UPCs, assume OK
+    try:
+        if page_text is None:
+            resp = requests.get(url, headers=BROWSER_HEADERS, timeout=6, allow_redirects=True)
+            if resp.status_code != 200:
+                return False
+            page_text = resp.text
+        # Check if the UPC appears anywhere on the page
+        if upc_clean in page_text:
+            return True
+        # Also check with common formatting (dashes, spaces)
+        if len(upc_clean) == 12:
+            formatted = f'{upc_clean[:1]}-{upc_clean[1:6]}-{upc_clean[6:11]}-{upc_clean[11:]}'
+            if formatted in page_text:
+                return True
+        print(f'UPC {upc_clean} NOT found on page {url[:60]} — likely wrong product')
+        return False
+    except Exception as e:
+        print(f'UPC page verification error: {e}')
+        return False
+
+
 def search_product_on_web(upc=None, name=None):
     """Search for a product on major retail sites. Priority order:
     1. Direct retailer search (fastest, most reliable from datacenter IPs)
@@ -678,18 +705,85 @@ def search_product_on_web(upc=None, name=None):
     upc_clean = re.sub(r'[^0-9]', '', str(upc)) if upc else ''
     has_upc = bool(upc_clean) and upc_clean not in ('0', '')
 
-    def _validate_and_return(url, source, original_name, min_similarity=0.35):
-        """Fetch page title, validate similarity, return result or None.
-        min_similarity: minimum word-overlap score (0.0-1.0) to accept the result.
-        Default 0.35 means at least 35% of words from the shorter name must appear
-        in the longer name. This prevents returning random/suggested products."""
-        page_title = _fetch_product_title_from_page(url)
-        if original_name and page_title:
-            sim = _name_similarity(original_name, page_title)
-            if sim < min_similarity:
-                print(f'Result rejected (sim={sim:.2f} < {min_similarity}): "{page_title}" vs "{original_name}"')
+    def _validate_and_return(url, source, original_name, searched_by_upc=False):
+        """Fetch page title and validate the result is the correct product.
+        Three checks:
+        1. If we searched by UPC, verify the UPC appears on the product page
+        2. If we can't fetch a page title, reject (can't verify)
+        3. Name similarity must pass threshold (higher for short names)
+        Returns result dict or None."""
+        try:
+            # Fetch the actual product page
+            resp = requests.get(url, headers=BROWSER_HEADERS, timeout=6, allow_redirects=True)
+            if resp.status_code != 200:
+                print(f'Page fetch failed ({resp.status_code}) for {url[:60]}')
                 return None
-            print(f'Result accepted (sim={sim:.2f}): "{page_title}" for "{original_name}"')
+            page_text = resp.text
+        except Exception as e:
+            print(f'Page fetch error for {url[:60]}: {e}')
+            return None
+
+        # CHECK 1: If searched by UPC, verify UPC appears on the page
+        if searched_by_upc and has_upc:
+            if not _verify_upc_on_page(url, upc_clean, page_text=page_text):
+                return None
+
+        # Extract page title
+        page_title = None
+        try:
+            soup = BeautifulSoup(page_text, 'html.parser')
+            # Amazon
+            if 'amazon.com' in url:
+                el = soup.find('span', id='productTitle')
+                if el:
+                    page_title = el.get_text(strip=True)
+            # Walmart
+            elif 'walmart.com' in url:
+                el = soup.find('h1', itemprop='name') or soup.find('h1')
+                if el:
+                    page_title = el.get_text(strip=True)
+            # Target
+            elif 'target.com' in url:
+                el = soup.find('h1') or soup.find('title')
+                if el:
+                    t = el.get_text(strip=True)
+                    page_title = re.sub(r'\s*[:\-–|]\s*Target$', '', t)
+            # Home Depot
+            elif 'homedepot.com' in url:
+                el = soup.find('h1', class_='product-details__title') or soup.find('h1')
+                if el:
+                    page_title = el.get_text(strip=True)
+            # Generic fallback
+            if not page_title:
+                title_tag = soup.find('title')
+                if title_tag:
+                    t = title_tag.get_text(strip=True)
+                    page_title = re.sub(r'\s*[:\-–|]\s*(Amazon\.com|Walmart|Target|Home Depot|Costco|Best Buy|eBay).*$', '', t).strip()
+        except Exception:
+            pass
+
+        # CHECK 2: If we can't get a title, reject — we can't verify this is right
+        if not page_title:
+            print(f'Could not extract title from {url[:60]} — rejecting')
+            return None
+
+        # CHECK 3: Name similarity — require higher threshold for short names
+        if original_name:
+            sim = _name_similarity(original_name, page_title)
+            # Short names (1-3 meaningful words) need higher threshold because
+            # a single shared category word (e.g., "light") can cause false matches
+            clean_words = set(re.sub(r'[^a-z0-9\s]', '', original_name.lower()).split())
+            stop = {'the', 'a', 'an', 'and', 'or', 'of', 'for', 'in', 'with', 'to', 'by',
+                    'is', 'at', 'on', 'from', 'pack', 'ct', 'oz', 'lb', 'count', 'ea',
+                    'each', 'per', 'size', 'new', 'free', 'buy', 'best', 'top', 'item'}
+            meaningful_words = clean_words - stop
+            min_sim = 0.55 if len(meaningful_words) <= 3 else 0.35
+
+            if sim < min_sim:
+                print(f'Result rejected (sim={sim:.2f} < {min_sim}): "{page_title[:60]}" vs "{original_name[:60]}"')
+                return None
+            print(f'Result accepted (sim={sim:.2f} >= {min_sim}): "{page_title[:60]}" for "{original_name[:60]}"')
+
         return {'url': url, 'title': page_title, 'source': source}
 
     # ── Strategy 1: Direct retailer search (FAST — goes straight to retailer sites) ──
@@ -698,7 +792,7 @@ def search_product_on_web(upc=None, name=None):
         try:
             direct_url, _, direct_source = _search_retailer_directly(upc, None)
             if direct_url:
-                r = _validate_and_return(direct_url, direct_source, name)
+                r = _validate_and_return(direct_url, direct_source, name, searched_by_upc=True)
                 if r:
                     print(f'Direct UPC retailer search hit: {direct_url}')
                     return r
@@ -710,7 +804,7 @@ def search_product_on_web(upc=None, name=None):
         try:
             direct_url, _, direct_source = _search_retailer_directly(None, name)
             if direct_url:
-                r = _validate_and_return(direct_url, direct_source, name)
+                r = _validate_and_return(direct_url, direct_source, name, searched_by_upc=False)
                 if r:
                     print(f'Direct name retailer search hit: {direct_url}')
                     return r
@@ -718,12 +812,11 @@ def search_product_on_web(upc=None, name=None):
             print(f'Direct name retailer search failed: {e}')
 
     # ── Strategy 2: SearXNG meta-search (SLOW fallback — most instances fail from datacenter) ──
-    # Only try 1 query to keep it fast. If SearXNG is working, one query is enough.
     if has_upc:
         try:
             url, snippet_title, source = _search_searxng(f'{upc_clean}', max_instances=2)
             if url:
-                r = _validate_and_return(url, source, name)
+                r = _validate_and_return(url, source, name, searched_by_upc=True)
                 if r:
                     return r
         except Exception:
@@ -734,7 +827,7 @@ def search_product_on_web(upc=None, name=None):
             clean_name = str(name).strip()
             url, snippet_title, source = _search_searxng(f'{clean_name} buy', max_instances=2)
             if url:
-                r = _validate_and_return(url, source, name)
+                r = _validate_and_return(url, source, name, searched_by_upc=False)
                 if r:
                     return r
         except Exception:
@@ -1240,12 +1333,20 @@ def _enrich_single_item(i, items):
             print(f'Enrichment UPC MATCH: "{original_name}" → "{info["title"]}" (source: {info["source"]})')
     elif info['title'] and original_name:
         sim = _name_similarity(original_name, info['title'])
-        if sim >= 0.35:
+        # Higher threshold for short names (1-3 meaningful words) since one
+        # shared category word can cause false matches
+        clean_words = set(re.sub(r'[^a-z0-9\s]', '', original_name.lower()).split())
+        _stop = {'the', 'a', 'an', 'and', 'or', 'of', 'for', 'in', 'with', 'to', 'by',
+                'is', 'at', 'on', 'from', 'pack', 'ct', 'oz', 'lb', 'count', 'ea',
+                'each', 'per', 'size', 'new', 'free', 'buy', 'best', 'top', 'item'}
+        meaningful_words = clean_words - _stop
+        min_sim = 0.55 if len(meaningful_words) <= 3 else 0.35
+        if sim >= min_sim:
             lookup_is_relevant = True
-            print(f'Enrichment NAME MATCH (sim={sim:.2f}): "{original_name}" → "{info["title"]}"')
+            print(f'Enrichment NAME MATCH (sim={sim:.2f} >= {min_sim}): "{original_name}" → "{info["title"]}"')
         else:
             lookup_is_relevant = False
-            print(f'Enrichment REJECTED (sim={sim:.2f}): "{original_name}" ≠ "{info["title"]}" — keeping original')
+            print(f'Enrichment REJECTED (sim={sim:.2f} < {min_sim}): "{original_name}" ≠ "{info["title"]}" — keeping original')
     elif info['title'] and not original_name:
         lookup_is_relevant = True
     else:
