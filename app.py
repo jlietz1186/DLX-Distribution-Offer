@@ -13,7 +13,7 @@ app = Flask(__name__)
 app.secret_key = os.environ.get('SECRET_KEY', 'dlx-offer-tool-dev-key-change-in-prod')
 
 # ── Enrichment version tag — printed in logs so we can verify correct deployment ──
-ENRICHMENT_VERSION = 'v4.1-2026-03-04'
+ENRICHMENT_VERSION = 'v4.2-2026-03-04'
 print(f'╔══════════════════════════════════════════════════════════╗')
 print(f'║  DLX Offer Formatter — Enrichment Engine {ENRICHMENT_VERSION}  ║')
 print(f'╚══════════════════════════════════════════════════════════╝')
@@ -218,8 +218,16 @@ RETAIL_PRIORITY = ['amazon', 'walmart', 'target', 'costco', 'kroger', 'walgreens
 # Browser-like headers for web scraping
 BROWSER_HEADERS = {
     'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
-    'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
-    'Accept-Language': 'en-US,en;q=0.5',
+    'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8',
+    'Accept-Language': 'en-US,en;q=0.9',
+    'Accept-Encoding': 'gzip, deflate, br',
+    'Sec-Fetch-Dest': 'document',
+    'Sec-Fetch-Mode': 'navigate',
+    'Sec-Fetch-Site': 'none',
+    'Sec-Fetch-User': '?1',
+    'Upgrade-Insecure-Requests': '1',
+    'Cache-Control': 'max-age=0',
+    'Connection': 'keep-alive',
 }
 
 # Simple in-memory cache to avoid burning rate limits on repeat lookups
@@ -1049,6 +1057,16 @@ def lookup_product_info(upc=None, name=None):
         web_result = search_product_on_web(upc=upc, name=name)
         if web_result['url'] and needs_link:
             result['retail_link'] = web_result['url']
+            # v4.2 CRITICAL FIX: If we searched by UPC and found a product page,
+            # mark upc_matched=True so _enrich_single_item trusts the result.
+            # Without this, the enrichment layer applies strict name-similarity
+            # thresholds and REJECTS valid UPC matches (e.g., Amazon calls the
+            # product "Rechargeable LED Flashlight & 360° Lantern" but the
+            # spreadsheet says "1,000 Lumens 3-sided CB Clip-on Light" — same
+            # product, different name, same UPC barcode).
+            if has_upc:
+                result['upc_matched'] = True
+                print(f'  Web search found link via UPC → setting upc_matched=True')
         if web_result['title'] and needs_title:
             result['title'] = web_result['title']
         if web_result['source'] and not result['source']:
